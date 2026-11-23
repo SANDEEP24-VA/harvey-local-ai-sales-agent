@@ -173,27 +173,43 @@ class _ClaudeProcess:
 
 @pytest.mark.asyncio
 async def test_a_cli_reported_api_error_is_no_reply_not_model_text(state, monkeypatch):
-    # The CLI can report an API error (overloaded, rate limited) inside a
-    # successful exit. That text is not the model's answer: no caller should
-    # treat it as a draft, and the Writer must not count it as a bad one.
+    # An API error (overloaded, rate limited, 500) is not model text:
+    # no caller should treat it as a draft, and the Writer must not count it as a bad one.
+    import httpx
     import sellbird.brain as brain_mod
     from sellbird.brain import Brain
 
-    payloads = []
+    # Disallow external CLI subprocess execution
+    async def no_subprocess(*a, **kw):
+        raise AssertionError("Brain must not invoke an external CLI subprocess")
 
-    async def fake_exec(*cmd, **kwargs):
-        return _ClaudeProcess(payloads.pop(0))
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", no_subprocess)
 
+    responses = [
+        httpx.Response(500, json={"error": "API Error: 529 Overloaded"},
+                       request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat")),
+        httpx.Response(500, json={"error": "API Error: 529 Overloaded"},
+                       request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat")),
+        httpx.Response(500, json={"error": "API Error: 529 Overloaded"},
+                       request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat")),
+        httpx.Response(500, json={"error": "API Error: 529 Overloaded"},
+                       request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat")),
+        httpx.Response(500, json={"error": "API Error: 529 Overloaded"},
+                       request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat")),
+        httpx.Response(200, json={"message": {"content": '{"ok": true}'}},
+                       request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat")),
+    ]
+
+    async def fake_post(client, url, *args, **kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(brain_mod.httpx.AsyncClient, "post", fake_post)
     async def no_sleep(*a, **kw):
         return None
-
-    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(brain_mod.asyncio, "sleep", no_sleep)
     brain = Brain(state)
 
-    payloads[:] = [{"type": "result", "is_error": True, "result": "API Error: 529 Overloaded"}] * 5
     assert await brain.think("hi", max_retries=1) == ""
     assert await brain.think_json("hi") is None and brain.last_reply_empty is True
 
-    payloads[:] = [{"type": "result", "is_error": False, "result": '{"ok": true}'}]
     assert await brain.think_json("hi") == {"ok": True} and brain.last_reply_empty is False

@@ -144,50 +144,44 @@ def test_windows_setup_checks_refuse_codex(native_home, on_windows):
 
 @pytest.mark.asyncio
 async def test_windows_quota_and_brain_pause_cleanly(on_windows, tmp_path):
-    import json as _json
-
-    from sellbird.brain import BRAIN_STATUS_KEY, Brain
+    from pydantic import ValidationError
     from sellbird.config import BrainConfig
-    from sellbird.state import StateManager
 
-    state = StateManager(str(tmp_path / "w.db"))
-    await state.init_db()
-    brain = Brain(state, BrainConfig(provider="codex", model="gpt-5.5"))
-    assert await brain.quota.get_utilization() is None
-    problem = await brain.preflight()
-    assert "macOS and Linux" in problem
-    stored = _json.loads(await state.get_setting(BRAIN_STATUS_KEY))
-    assert stored["status"] == "paused" and stored["kind"] == "setup"
-    assert await brain.think("hi") == ""
+    with pytest.raises(ValidationError) as err:
+        BrainConfig(provider="codex", model="gpt-5.5")
+    assert "disabled. Only local Ollama inference is supported" in str(err.value)
 
 
 def test_windows_setup_offers_claude_instead(monkeypatch, on_windows, capsys):
     import sellbird.setup as setup_mod
     from sellbird.config import BrainConfig
 
-    answers = iter(["codex", "claude", ""])
+    answers = iter(["codex", "claude", "ollama", ""])
     monkeypatch.setattr(setup_mod, "_ask", lambda *a, **k: next(answers))
     assert setup_mod._ask_brain_config() == BrainConfig()
-    assert "macOS and Linux" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "disabled. Only local Ollama inference is supported" in out
 
 
 @pytest.mark.asyncio
 async def test_claude_is_unaffected_on_windows(on_windows, monkeypatch, tmp_path):
+    import httpx
     import sellbird.brain as brain_mod
     from sellbird.brain import Brain
     from sellbird.state import StateManager
 
-    class Proc:
-        returncode = 0
+    # Subprocess execution must never be triggered
+    async def no_subprocess(*cmd, **kwargs):
+        raise AssertionError("Brain on Windows must not invoke an external CLI subprocess")
 
-        async def communicate(self, data=None):
-            return b'{"type": "result", "result": "ok", "session_id": "s"}', b""
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", no_subprocess)
 
-    async def fake_claude(*cmd, **kwargs):
-        assert cmd[0] == "claude"
-        return Proc()
+    async def fake_ollama_post(client, url, *args, **kwargs):
+        return httpx.Response(200, json={"message": {"content": "ok"}}, request=httpx.Request("POST", url))
 
-    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_claude)
+    monkeypatch.setattr(brain_mod.httpx.AsyncClient, "post", fake_ollama_post)
+    monkeypatch.setattr(brain_mod.Brain, "_ollama_preflight", lambda self: asyncio.sleep(0, result=""))
+
     state = StateManager(str(tmp_path / "c.db"))
     await state.init_db()
     brain = Brain(state)

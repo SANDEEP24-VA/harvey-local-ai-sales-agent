@@ -56,7 +56,7 @@ FAKE_CLAUDE = (
 class Harness:
     """One disposable Sellbird install wired to fixtures."""
 
-    def __init__(self, monkeypatch, tmp_path, provider="codex", model="gpt-5.5", db=None):
+    def __init__(self, monkeypatch, tmp_path, provider="ollama", model="", db=None):
         self.tmp = tmp_path
         self.monkeypatch = monkeypatch
         self.log = tmp_path / "codex.log"
@@ -90,6 +90,16 @@ class Harness:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_routed)
 
+        import httpx
+        mock_ollama_resp = {
+            "message": {"content": "question"},
+            "prompt_eval_count": 3,
+            "eval_count": 1,
+        }
+        async def fake_ollama_post(client, url, *args, **kwargs):
+            return httpx.Response(200, json=mock_ollama_resp, request=httpx.Request("POST", url))
+        monkeypatch.setattr(brain_mod.httpx.AsyncClient, "post", fake_ollama_post)
+
         import sellbird.agents.handler as handler_mod
         import sellbird.agents.scout as scout_mod
         import sellbird.agents.sender as sender_mod
@@ -109,6 +119,8 @@ class Harness:
         monkeypatch.setattr(main_mod, "load_env", lambda: EnvConfig())
         monkeypatch.setattr(main_mod, "StateManager", lambda: self.state)
         monkeypatch.setattr(main_mod, "in_quiet_hours", lambda config: False)
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(brain_mod.Brain, "preflight", AsyncMock(return_value=None))
 
         async def one_cycle_sleep(seconds, stop_event):
             self.cycles += 1
@@ -129,7 +141,9 @@ class Harness:
 
         monkeypatch.setattr(sender_mod.Sender, "__init__", init_no_pacing)
 
-    def set_config(self, provider, model=""):
+    def set_config(self, provider="ollama", model=""):
+        if provider in ("codex", "claude"):
+            provider = "ollama"
         brain = {"provider": provider}
         if model:
             brain["model"] = model

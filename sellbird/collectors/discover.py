@@ -1115,6 +1115,16 @@ class OpenStreetMap(DiscoveryProvider):
         "panader": ['shop=bakery'],
         "clinica": ['amenity=clinic'],
         "clínica": ['amenity=clinic'],
+        # B2B software, technology & consulting
+        "software": ['office=it', 'office=software', 'office=company'],
+        "tech": ['office=it', 'office=company'],
+        "it": ['office=it'],
+        "security": ['office=security', 'office=it'],
+        "consult": ['office=consulting', 'office=management'],
+        "market": ['office=advertising', 'office=marketing'],
+        "saas": ['office=it', 'office=company'],
+        "cloud": ['office=it', 'office=telecommunication'],
+        "ai": ['office=it', 'office=research'],
     }
 
     def _tags(self, term: str) -> list[str]:
@@ -1459,16 +1469,105 @@ class ScavioSearch(ScavioProvider):
         return out
 
 
+class DuckDuckGoDiscovery(DiscoveryProvider):
+    """Free public web search provider using DuckDuckGo HTML without paid API keys.
+
+    Zero cost, zero API keys, no coordinates required. Discovers businesses and rankings directly.
+    """
+    key = "ddg"
+    label = "DuckDuckGo (Free Public Search)"
+    kind = "serp"
+    needs_coordinates = False
+    blurb = "Free public web search. No API key or subscription needed."
+    cost_note = "free"
+    free_tier = "unlimited public search"
+    signup_url = "https://duckduckgo.com"
+    env_keys = ()
+    caveat = "Respectful request pacing applied to honor public search etiquette."
+
+    def estimate(self, queries: list[DiscoveryQuery]) -> float:
+        return 0.0
+
+    async def fetch(self, client: httpx.AsyncClient, env: dict, query: DiscoveryQuery) -> list[Business]:
+        import urllib.parse
+        from bs4 import BeautifulSoup
+        from sellbird.public_http import public_http_client
+
+        search_phrase = query.keyword()
+        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_phrase)}"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+
+        out: list[Business] = []
+        try:
+            async with public_http_client(timeout=15.0) as http_client:
+                resp = await http_client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    self.last_error = f"DuckDuckGo returned HTTP {resp.status_code}"
+                    return []
+                html = resp.text
+        except Exception as e:
+            self.last_error = f"DuckDuckGo request error: {e}"
+            return []
+
+        soup = BeautifulSoup(html, "html.parser")
+        results = soup.select(".result")
+        for idx, result in enumerate(results[:query.depth], 1):
+            link = result.select_one(".result__a")
+            if not link or not link.get("href"):
+                continue
+            href = link.get("href", "")
+            if "uddg=" in href:
+                try:
+                    params = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                    real = params.get("uddg", [])
+                    if real:
+                        href = real[0]
+                except Exception:
+                    pass
+            if not href.startswith("http"):
+                continue
+            domain = normalize_domain(href)
+            if not domain or is_junk_domain(domain):
+                continue
+            title = link.get_text().strip()
+            name = business_name(title, domain)
+            if is_junk_name(name):
+                continue
+
+            out.append(Business(
+                name=name,
+                raw_title=title,
+                domain=domain,
+                website=href,
+                location=query.location,
+                rank=idx,
+                has_website=True,
+                source_url=href,
+                provider=self.key,
+            ))
+        return out
+
+
+PERMITTED_FREE_PROVIDERS = ("osm", "ddg", "manual")
+PROHIBITED_PAID_PROVIDERS = (
+    "dataforseo_listings",
+    "dataforseo_serp",
+    "dataforseo_maps",
+    "serper",
+    "scavio_maps",
+    "scavio_search",
+    "tinyfish",
+)
+
 PROVIDERS: dict[str, DiscoveryProvider] = {
     p.key: p for p in (
         OpenStreetMap(),
-        TinyFish(),
-        DataForSEOListings(),
-        DataForSEOSerp(),
-        DataForSEOMaps(),
-        Serper(),
-        ScavioMaps(),
-        ScavioSearch(),
+        DuckDuckGoDiscovery(),
     )
 }
 
@@ -1636,6 +1735,8 @@ def preset_problem(preset: str, provider_key: str, config=None) -> str | None:
     """Why ``preset`` can't run on ``provider_key`` (with ``config``), or None."""
     if not preset:
         return None
+    if provider_key in PROHIBITED_PAID_PROVIDERS:
+        return f"Paid discovery provider {provider_key!r} is disabled. This deployment exclusively uses free public discovery."
     spec = PRESETS.get(preset)
     if spec is None:
         return f"Unknown preset {preset!r}. Presets: {', '.join(PRESETS)}."
@@ -1692,6 +1793,11 @@ def build_queries(config, cities: list[str] | None = None,
 
 def estimate_cost(provider_key: str, queries: list[DiscoveryQuery]) -> float:
     """Projected spend. Always call this before a run — and print it."""
+    if provider_key in PROHIBITED_PAID_PROVIDERS:
+        raise ValueError(
+            f"Paid discovery provider '{provider_key}' is disabled. "
+            "This deployment exclusively supports free public discovery (osm, ddg, manual)."
+        )
     provider = PROVIDERS.get(provider_key)
     return provider.estimate(queries) if provider else 0.0
 
@@ -1714,6 +1820,11 @@ async def run_discovery(
     from sellbird.gate import do_not_contact_domain_match
     from sellbird.signals import seed_signal_catalog
 
+    if provider_key in PROHIBITED_PAID_PROVIDERS:
+        raise ValueError(
+            f"Paid discovery provider '{provider_key}' is disabled. "
+            "This deployment exclusively supports free public discovery (osm, ddg, manual)."
+        )
     provider = PROVIDERS.get(provider_key)
     if provider is None:
         raise ValueError(f"unknown discovery provider: {provider_key!r}")

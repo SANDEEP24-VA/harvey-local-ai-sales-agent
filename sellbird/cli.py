@@ -1116,6 +1116,43 @@ def cmd_suppressions(args):
         sys.exit(code)
 
 
+def cmd_hardware(args):
+    """Show system hardware profile, tier, and local AI model recommendations."""
+    from sellbird.hardware_profiler import get_hardware_profile
+    profile = get_hardware_profile()
+
+    print("\n  ========================================================")
+    print("  Sellbird Local AI Hardware Profiler")
+    print("  ========================================================\n")
+    print(f"  Tier:           {profile['tier_label']}")
+    print(f"  Description:    {profile['tier_description']}\n")
+    print("  [Memory]")
+    print(f"  - Total RAM:    {profile['ram']['total_gb']} GB")
+    print(f"  - Available:    {profile['ram']['available_gb']} GB")
+    print(f"  - Used:         {profile['ram']['used_gb']} GB ({profile['ram']['percent_used']}%)")
+    print("\n  [Compute / CPU]")
+    print(f"  - Architecture: {profile['cpu']['architecture']}")
+    print(f"  - Cores:        {profile['cpu']['physical_cores']} physical / {profile['cpu']['logical_cores']} logical")
+    print(f"  - Processor:    {profile['cpu']['processor']}")
+    print("\n  [GPU / Acceleration]")
+    if profile['gpu']['has_nvidia_gpu']:
+        print(f"  - GPU:          {profile['gpu']['gpu_name']}")
+        print(f"  - Total VRAM:   {profile['gpu']['vram_total_gb']} GB")
+        print(f"  - Free VRAM:    {profile['gpu']['vram_free_gb']} GB")
+        print(f"  - Driver:       {profile['gpu']['driver_version']}")
+    else:
+        print("  - GPU:          None detected (Running in CPU mode)")
+    print("\n  [Model Recommendations]")
+    print(f"  - Active Model: {profile['default_model']}")
+    print(f"  - Recommended:  {', '.join(profile['recommended_models'])}")
+    if profile['warnings']:
+        print("\n  [Advisories]")
+        for w in profile['warnings']:
+            print(f"  - {w}")
+    print("\n  ========================================================\n")
+    return 0
+
+
 def main():
     from sellbird.textio import utf8_stdio
     utf8_stdio()
@@ -1151,8 +1188,8 @@ def main():
         help="Max pages to crawl (default: 100)",
     )
     sub.add_argument(
-        "--provider", choices=["claude", "codex"], default=None,
-        help="Subscription to think with (default: the one in your config, else claude)",
+        "--provider", choices=["ollama"], default=None,
+        help="Local AI provider to think with (default: ollama)",
     )
     sub.add_argument("--model", default=None, help="Model for this provider (default: provider default)")
     sub.add_argument(
@@ -1326,6 +1363,10 @@ def main():
     sub.add_argument("value", nargs="?", default="", help="add: an address or domain; remove: its id")
     sub.set_defaults(func=cmd_suppressions)
 
+    # sellbird hardware
+    sub = subparsers.add_parser("hardware", help="Show system hardware profile and local AI tier recommendations")
+    sub.set_defaults(func=cmd_hardware)
+
     # Commands that installed extensions add (sellbird.extensions). A name the
     # built-in CLI already uses is refused, so an extension never hides one.
     from sellbird import extensions
@@ -1358,6 +1399,7 @@ def main():
         print("    sellbird setup     — Configure Sellbird (first time)")
         print("    sellbird run       — Start closing deals")
         print("    sellbird dashboard — Open the web dashboard")
+        print("    sellbird hardware  — Inspect system hardware profile and AI tier")
         print()
         sys.exit(0)
 

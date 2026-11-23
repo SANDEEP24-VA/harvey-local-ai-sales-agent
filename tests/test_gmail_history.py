@@ -236,7 +236,7 @@ async def test_an_unsubscribe_seen_only_in_history_stops_the_follow_up(monkeypat
     import httpx
     from tests.test_codex_e2e import Harness, _approved_item
     from tests.test_gmail_send_outcomes import transport_provider
-    harness = Harness(monkeypatch, tmp_path, provider="claude", model="")
+    harness = Harness(monkeypatch, tmp_path, provider="ollama", model="")
     await harness.state.init_db()
     calls = []
 

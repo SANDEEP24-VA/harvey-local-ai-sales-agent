@@ -911,6 +911,24 @@ class Handler:
         if stored is not None:
             convo = stored.model_copy(deep=True)
         else:
+            product_id = None
+            if campaign_id:
+                try:
+                    async with self.state._connect() as db:
+                        async with db.execute("SELECT product_id FROM campaigns WHERE id = ?", (campaign_id,)) as cursor:
+                            row = await cursor.fetchone()
+                            if row and row[0]:
+                                product_id = row[0]
+                except Exception:
+                    pass
+            if not product_id:
+                try:
+                    matches = await self.state.get_prospect_product_matches(prospect_id=prospect.id, min_score=50.0)
+                    if matches:
+                        product_id = matches[0].product_id
+                except Exception:
+                    pass
+
             convo = Conversation(
                 id="",
                 prospect_id=prospect.id,
@@ -918,6 +936,7 @@ class Handler:
                 channel="email",
                 intent=intent,
                 status="open",
+                product_id=product_id,
             )
         convo.thread.append(Message(sender="prospect", content=reply_text))
         convo.intent = intent
@@ -1442,10 +1461,17 @@ Respond with ONLY the category label, nothing else."""
         """Generate an appropriate response based on intent."""
         history = conversation_history(convo.thread, prospect.full_name())
 
+        product = None
+        if getattr(convo, "product_id", None):
+            try:
+                product = await self.state.get_product(convo.product_id)
+            except Exception:
+                product = None
+
         objection_context = ""
         if intent == "objection":
-            # Check if we have a pre-configured response
-            for trigger, response in self.config.product.objection_responses.items():
+            obj_map = product.objection_responses if (product and product.objection_responses) else self.config.product.objection_responses
+            for trigger, response in obj_map.items():
                 if trigger.lower() in reply_text.lower():
                     objection_context = f"\nSuggested approach for this objection: {response}"
                     break
@@ -1468,11 +1494,13 @@ Respond with ONLY the category label, nothing else."""
                 "Answer their message and follow the intent guidance above."
             )
 
+        p_name = product.name if product else self.config.product.name
+        p_desc = product.description if product else self.config.product.description
         prompt = self.brain.load_prompt("handler", stage=convo.stage, booking=booking)
         if not prompt:
             prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
 Your tone is: {self.config.persona.tone}
-Product: {self.config.product.name} — {self.config.product.description}
+Product: {p_name} — {p_desc}
 
 NEXT STEP
 {booking}"""
@@ -1600,3 +1628,204 @@ Write ONLY the email body."""
         if rewrite and not style_problems("", rewrite, kind="reply", names=names):
             return rewrite
         return body
+
+    async def test_classify_reply(
+        self,
+        reply_text: str,
+        prospect: Prospect | None = None,
+        product: Product | None = None,
+        history: list[dict] | None = None,
+    ) -> dict[str, Any]:
+        """Classify a reply and preview the response without saving or sending."""
+        from sellbird.models.prospect import Prospect
+        from sellbird.models.conversation import Conversation, Message
+        if prospect is None:
+            prospect = Prospect(
+                id="test-prospect-id",
+                first_name="Jane",
+                last_name="Doe",
+                company="Acme Corp",
+                title="VP of Sales",
+                email="jane.doe@acme.example.com",
+                industry="Software",
+            )
+
+        stripped = strip_quoted_reply(reply_text) or reply_text
+        keyword_text = _flat(stripped)
+        opt_out = _opt_out_reason(stripped, stripped)
+        escalate = _escalates(keyword_text)
+
+        if opt_out:
+            intent = "unsubscribe"
+        elif escalate:
+            intent = "escalate"
+        else:
+            try:
+                intent = await self._classify_intent(stripped, prospect)
+            except Exception as e:
+                logger.warning(f"Handler test classification fallback ({e})")
+                intent = "question"
+
+        stage = self._determine_stage(intent, "initial_outreach", stripped)
+        requires_human = intent in ("escalate", "ooo", "not_interested") or opt_out is not None
+
+        convo = Conversation(
+            id="test-convo-id",
+            prospect_id=prospect.id,
+            channel="email",
+            intent=intent,
+            stage=stage,
+            status="needs_human" if requires_human else "open",
+            product_id=product.id if product else None,
+        )
+
+        if history:
+            for m in history:
+                convo.thread.append(Message(sender=m.get("sender", "prospect"), content=m.get("content", "")))
+        else:
+            convo.thread.append(Message(sender="sellbird", content="Initial outreach email touching on your sales process."))
+        convo.thread.append(Message(sender="prospect", content=stripped))
+
+        preview_response = ""
+        if intent in AUTO_REPLY_INTENTS:
+            try:
+                preview_response = await self._generate_response(intent, stripped, prospect, convo)
+            except Exception as e:
+                logger.warning(f"Handler test preview response generation failed: {e}")
+                preview_response = f"Simulated response to {intent} inquiry."
+        elif intent == "unsubscribe":
+            preview_response = "[No response sent: contact opted out and address suppressed in compliance with email standards.]"
+        elif intent == "not_interested":
+            preview_response = "[No response sent: prospect marked as lost. Conversation closed.]"
+        elif intent == "ooo":
+            preview_response = "[No response sent: out-of-office message held for human review.]"
+        elif intent == "escalate":
+            preview_response = "[No response sent: message escalated for immediate human handling.]"
+
+        return {
+            "intent": intent,
+            "stage": stage,
+            "is_opt_out": bool(opt_out),
+            "is_escalate": bool(escalate),
+            "requires_human": requires_human,
+            "preview_response": preview_response,
+            "prospect_name": prospect.full_name(),
+            "prospect_company": prospect.company,
+            "product_name": product.name if product else (self.config.product.name if hasattr(self.config, "product") else "Default Product"),
+        }
+
+
+SAMPLE_CONVERSATIONS: list[dict[str, Any]] = [
+    {
+        "id": "sample-interested-meeting",
+        "title": "Meeting Request / High Interest",
+        "expected_intent": "interested",
+        "prospect": {
+            "first_name": "Alex",
+            "last_name": "Rivera",
+            "title": "VP of Sales Operations",
+            "company": "Apex Global Solutions",
+            "industry": "B2B Technology",
+            "email": "alex.rivera@apexsolutions.example.com",
+        },
+        "reply_text": "Hi, thanks for reaching out. Your timing is great as we've been struggling with pipeline conversion. Do you have 15 minutes this Thursday afternoon for a quick demo?",
+    },
+    {
+        "id": "sample-objection-competitor",
+        "title": "Competitor Objection",
+        "expected_intent": "objection",
+        "prospect": {
+            "first_name": "Jordan",
+            "last_name": "Lee",
+            "title": "Head of Growth",
+            "company": "Vanguard Media",
+            "industry": "Digital Marketing",
+            "email": "jordan.lee@vanguardmedia.example.com",
+        },
+        "reply_text": "We already have an active subscription with Apollo and HubSpot. Not looking to switch vendors unless there is a massive differentiation in data accuracy.",
+    },
+    {
+        "id": "sample-accepted-offer",
+        "title": "Accepted Free Offer",
+        "expected_intent": "accepted_offer",
+        "prospect": {
+            "first_name": "Morgan",
+            "last_name": "Taylor",
+            "title": "Managing Director",
+            "company": "Beacon Logistics",
+            "industry": "Supply Chain",
+            "email": "morgan.t@beaconlogistics.example.com",
+        },
+        "reply_text": "Sure, I'd appreciate the free competitor analysis mockup you offered. Please send that over when ready.",
+    },
+    {
+        "id": "sample-wrong-person",
+        "title": "Wrong Person / Referral",
+        "expected_intent": "wrong_person",
+        "prospect": {
+            "first_name": "Samantha",
+            "last_name": "Miller",
+            "title": "Executive Assistant",
+            "company": "Stratus Enterprises",
+            "industry": "Enterprise Software",
+            "email": "sam.miller@stratus.example.com",
+        },
+        "reply_text": "I don't handle our marketing or sales infrastructure. You should contact David Vance at david.v@stratus.example.com instead.",
+    },
+    {
+        "id": "sample-question-pricing",
+        "title": "Technical / Pricing Question",
+        "expected_intent": "question",
+        "prospect": {
+            "first_name": "Marcus",
+            "last_name": "Chen",
+            "title": "Chief Technology Officer",
+            "company": "Fintech Core Inc",
+            "industry": "Financial Services",
+            "email": "mchen@fintechcore.example.com",
+        },
+        "reply_text": "Could you clarify whether your platform requires transmitting our lead data to a third-party cloud API, or does everything run on-premise inside our private network?",
+    },
+    {
+        "id": "sample-unsubscribe",
+        "title": "Opt-Out / Unsubscribe",
+        "expected_intent": "unsubscribe",
+        "prospect": {
+            "first_name": "Emily",
+            "last_name": "Watson",
+            "title": "Director of Operations",
+            "company": "Nexus Consulting",
+            "industry": "Management Consulting",
+            "email": "emily.w@nexusconsulting.example.com",
+        },
+        "reply_text": "Please remove me from your mailing list and do not contact me again.",
+    },
+    {
+        "id": "sample-out-of-office",
+        "title": "Out of Office Auto-reply",
+        "expected_intent": "ooo",
+        "prospect": {
+            "first_name": "David",
+            "last_name": "Kim",
+            "title": "VP Marketing",
+            "company": "Crestline Ventures",
+            "industry": "Venture Capital",
+            "email": "dkim@crestline.example.com",
+        },
+        "reply_text": "Thank you for your email. I am currently out of the office on annual leave until next Tuesday, November 28, with no email access.",
+    },
+    {
+        "id": "sample-not-interested",
+        "title": "Polite Not Interested",
+        "expected_intent": "not_interested",
+        "prospect": {
+            "first_name": "Rachel",
+            "last_name": "Green",
+            "title": "COO",
+            "company": "Solstice Labs",
+            "industry": "Biotechnology",
+            "email": "rachel@solsticelabs.example.com",
+        },
+        "reply_text": "Thanks for thinking of us, but we are all set with our current stack and not interested in exploring anything new right now.",
+    },
+]

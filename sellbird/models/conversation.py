@@ -39,6 +39,7 @@ class Conversation(BaseModel):
     intent: str = ""  # interested/objection/not_interested/ooo/wrong_person
     stage: str = "initial_outreach"  # sales pipeline stage
     status: str = "open"  # open/replied/meeting_booked/closed
+    product_id: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

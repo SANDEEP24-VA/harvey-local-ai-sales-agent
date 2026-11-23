@@ -281,14 +281,19 @@ class Writer:
             if not prospects:
                 continue
 
+            # Determine product context for this batch
+            product = await self._resolve_product_for_batch(prospects)
+            product_id = product.id if product else None
+
             logger.info(
                 f"Writer: Creating campaign '{batch_name}' for "
                 f"{len(prospects)} prospects."
+                + (f" [Product: {product.name}]" if product else "")
             )
 
             # Generate the email sequence
             self._no_reply = False
-            sequence = await self._write_sequence(prospects)
+            sequence = await self._write_sequence(prospects, product=product)
             if not sequence:
                 paused = getattr(self.brain, "paused_reason", "") or (
                     "no reply from the model" if self._no_reply else "")
@@ -310,6 +315,7 @@ class Writer:
                 sequence=sequence,
                 prospect_ids=[p.id for p in prospects],
                 status="draft",
+                product_id=product_id,
             )
             campaign_id = await self.state.add_campaign(campaign)
 
@@ -321,7 +327,7 @@ class Writer:
             # Native providers: replace the shared template for email 1 with
             # a per-prospect draft grounded in that company's actual facts.
             if self.is_native:
-                await self._personalize_first_emails(campaign_id, prospects)
+                await self._personalize_first_emails(campaign_id, prospects, product=product)
 
             await self.state.log_action(
                 action_type="write_campaign",
@@ -406,7 +412,19 @@ class Writer:
                 f"{MAX_WRITE_ATTEMPTS} unusable drafts; marked write_failed."
             )
 
-    async def _personalize_first_emails(self, campaign_id: str, prospects: list):
+    async def _resolve_product_for_batch(self, prospects: list):
+        """Find the common or top matched product for this batch of prospects."""
+        if not prospects:
+            return None
+        try:
+            matches = await self.state.get_prospect_product_matches(prospect_id=prospects[0].id, min_score=50.0)
+            if matches:
+                return await self.state.get_product(matches[0].product_id)
+        except Exception as e:
+            logger.debug(f"Writer: resolve product failed: {e}")
+        return None
+
+    async def _personalize_first_emails(self, campaign_id: str, prospects: list, product=None):
         """Draft a grounded, per-prospect email 1 and stage it in the outbox.
 
         The outbox unique index means the sender's later template staging
@@ -425,7 +443,7 @@ class Writer:
         pending = []
         for prospect in prospects:
             try:
-                draft = await self._write_personal_email(prospect)
+                draft = await self._write_personal_email(prospect, product=product)
             except Exception as e:
                 logger.warning(f"Writer: personal draft failed for {prospect.email}: {e}")
                 continue
@@ -454,6 +472,7 @@ class Writer:
                 status=status,
                 provider=provider,
                 approved_by="" if require_approval else "autopilot",
+                product_id=product.id if product else None,
             )
             if item_id:
                 drafted += 1
@@ -517,7 +536,7 @@ class Writer:
             + lines
         )
 
-    async def _write_personal_email(self, prospect) -> dict | None:
+    async def _write_personal_email(self, prospect, product=None) -> dict | None:
         """One grounded draft for one person. Facts in, one email out."""
         inbox_rule = ""
         if prospect.is_company_inbox:
@@ -562,12 +581,39 @@ class Writer:
         if startup is not None:
             facts.extend(startup)
 
+        # Grounding with prospect problem statements and classified buying signals
+        try:
+            prod_id = product.id if product else None
+            if hasattr(self.state, "get_prospect_problem_statement") and prod_id:
+                problem_statement = await self.state.get_prospect_problem_statement(prospect.id, prod_id)
+                if problem_statement:
+                    if problem_statement.business_problem:
+                        facts.append(f"- Specific business problem: {problem_statement.business_problem}")
+                    if problem_statement.pain_points:
+                        facts.append(f"- Targeted pain points: {', '.join(problem_statement.pain_points)}")
+                    if problem_statement.business_impact:
+                        facts.append(f"- Cost/Impact of inaction: {problem_statement.business_impact}")
+                    if problem_statement.personalisation_angle:
+                        facts.append(f"- Outreach angle: {problem_statement.personalisation_angle}")
+            if hasattr(self.state, "get_classified_buying_signals"):
+                classified_signals = await self.state.get_classified_buying_signals(prospect.id, prod_id)
+                for sig in classified_signals[:3]:
+                    status_tag = f"[{sig.verification_status}] " if sig.verification_status else ""
+                    facts.append(f"- Buying signal: {status_tag}{sig.signal_code} - {sig.result}")
+        except Exception as e:
+            logger.debug(f"Writer: could not load problem statement or signals: {e}")
+
+        p_name = product.name if product else self.config.product.name
+        p_desc = product.description if product else self.config.product.description
+        p_benefits = "\n".join(f"- {b}" for b in (product.benefits or product.features)) if product else "\n".join(f"- {b}" for b in self.config.product.key_benefits)
+        p_pricing = f"{product.pricing_model} ({product.pricing_details})" if product else self.config.product.pricing
+
         prompt = self.brain.load_prompt(
             "writer",
-            product_name=self.config.product.name,
-            product_description=self.config.product.description,
-            product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
-            product_pricing=self.config.product.pricing,
+            product_name=p_name,
+            product_description=p_desc,
+            product_benefits=p_benefits,
+            product_pricing=p_pricing,
             persona_name=self.config.persona.name,
             persona_company=self.config.persona.company,
             persona_role=self.config.persona.role,
@@ -623,7 +669,7 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
             return None
         return {"subject": subject[:120], "body": body[:2000]}
 
-    async def _write_sequence(self, prospects: list) -> list[EmailStep]:
+    async def _write_sequence(self, prospects: list, product=None) -> list[EmailStep]:
         """Ask the brain to write a 3-email sequence."""
         # Build context about the prospects
         prospect_summary = "\n".join(
@@ -645,12 +691,17 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
                 "  these prospects' industry or role (use the notes above)."
             )
 
+        p_name = product.name if product else self.config.product.name
+        p_desc = product.description if product else self.config.product.description
+        p_benefits = "\n".join(f"- {b}" for b in (product.benefits or product.features)) if product else "\n".join(f"- {b}" for b in self.config.product.key_benefits)
+        p_pricing = f"{product.pricing_model} ({product.pricing_details})" if product else self.config.product.pricing
+
         prompt = self.brain.load_prompt(
             "writer",
-            product_name=self.config.product.name,
-            product_description=self.config.product.description,
-            product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
-            product_pricing=self.config.product.pricing,
+            product_name=p_name,
+            product_description=p_desc,
+            product_benefits=p_benefits,
+            product_pricing=p_pricing,
             persona_name=self.config.persona.name,
             persona_company=self.config.persona.company,
             persona_role=self.config.persona.role,
@@ -661,10 +712,10 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
             prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
 Your tone is: {self.config.persona.tone}
 
-Product: {self.config.product.name}
-Description: {self.config.product.description}
-Key benefits: {', '.join(self.config.product.key_benefits)}
-Pricing: {self.config.product.pricing}"""
+Product: {p_name}
+Description: {p_desc}
+Key benefits: {p_benefits}
+Pricing: {p_pricing}"""
 
         if self.skills:
             prompt += "\n\n" + self.skills

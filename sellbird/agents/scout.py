@@ -404,18 +404,13 @@ class Scout:
         if self._queries_this_cycle > 1:
             await asyncio.sleep(random.uniform(*SEARCH_DELAY))
 
-        serper_key = getattr(self.env, "serper_api_key", "") or ""
-        tinyfish_key = getattr(self.env, "tinyfish_api_key", "") or ""
-        backends = []
-        if serper_key:
-            backends.append(lambda: self._search_serper(query, serper_key))
-        if tinyfish_key:
-            backends.append(lambda: self._search_tinyfish(query, tinyfish_key))
-        backends.extend([
+        # Paid prospecting backends (Serper, TinyFish) are disabled in this deployment.
+        # Production search operates exclusively on free public discovery (DuckDuckGo, Bing, Google).
+        backends = [
             lambda: self._search_duckduckgo(query),
             lambda: self._search_bing(query),
             lambda: self._search_google(query),
-        ])
+        ]
 
         for backend in backends:
             try:
@@ -1313,7 +1308,40 @@ Respond ONLY with the JSON array."""
 
         contacts = [c for c in contacts if c.score >= 30]
         contacts.sort(key=lambda c: c.score, reverse=True)
+
+        # Multi-product catalog qualification
+        try:
+            await self.match_prospects_against_products(contacts)
+        except Exception as e:
+            logger.debug(f"Scout: multi-product qualification failed: {e}")
+
         return contacts
+
+    async def match_prospects_against_products(self, contacts: list[Prospect]) -> None:
+        """Evaluate researched contacts against active products in the multi-product catalog."""
+        if not contacts:
+            return
+        try:
+            active_products = await self.state.list_products(include_archived=False)
+        except Exception as e:
+            logger.debug(f"Scout: couldn't fetch active products: {e}")
+            return
+        if not active_products:
+            return
+
+        from sellbird.product_intelligence import match_prospect_product
+        for product in active_products:
+            icp = await self.state.get_product_icp(product.id)
+            for c in contacts:
+                try:
+                    match, evidence_items = await match_prospect_product(
+                        self.brain, c, product, icp
+                    )
+                    await self.state.add_prospect_product_match(match)
+                    for ev in evidence_items:
+                        await self.state.add_product_research_evidence(ev)
+                except Exception as e:
+                    logger.debug(f"Scout: matching {c.id} against {product.id} failed: {e}")
 
     def _heuristic_score(self, contact: Prospect) -> int:
         """Deterministic ICP fit score used as a fallback / baseline."""

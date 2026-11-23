@@ -1,5 +1,6 @@
 """Configuration loader for Sellbird. Reads sellbird.yaml + .env."""
 
+import ipaddress
 import logging
 import os
 import re
@@ -9,6 +10,7 @@ from contextvars import ContextVar
 from datetime import date as _date, time as _time
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlparse
 
 import yaml
 
@@ -696,35 +698,55 @@ class UsageConfig(BaseModel):
         return v
 
 
-BRAIN_PROVIDERS = ("claude", "codex")
+def _is_loopback_host(host: str) -> bool:
+    if not host:
+        return False
+    host = host.lower()
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback
+    except ValueError:
+        return False
+
+
+BRAIN_PROVIDERS = ("ollama",)
 CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
-# Model names are passed to a CLI, so they must look like a model name and
+# Model names are passed to a CLI or local inference endpoint, so they must look like a model name and
 # never like a flag ("-x") or anything a shell would treat specially.
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
 
 
 class BrainConfig(BaseModel):
-    """Which subscription Sellbird thinks with.
+    """Which engine Sellbird thinks with.
 
-    ``claude`` (default) runs Claude Code headless on your Claude plan.
-    ``codex`` runs Codex on your ChatGPT plan. There is never an automatic
-    fallback between them, and an explicit ``model`` only affects Sellbird —
-    your own Claude Code / Codex settings are never read or changed.
+    ``ollama`` (default & sole supported provider) runs local inference via Ollama HTTP API.
+    Legacy cloud providers (``claude``, ``codex``) are disabled and fail closed.
     """
 
-    provider: str = "claude"
+    provider: str = "ollama"
     model: str = ""  # empty = the provider's own default
-    reasoning_effort: str = ""  # codex only; empty = model default
+    reasoning_effort: str = ""  # codex legacy; empty = model default
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3:4b-instruct-2507-q4_K_M"
+    ollama_timeout: float = 120.0
+    ollama_temperature: float = 0.2
+    ollama_context_length: int = 8192
 
     @field_validator("provider", mode="before")
     @classmethod
     def _valid_provider(cls, v) -> str:
-        v = str(v or "claude").strip().lower()
+        v = str(v or "ollama").strip().lower()
+        if v in ("claude", "codex"):
+            raise ValueError(
+                f"'{v}' is disabled. Only local Ollama inference is supported."
+            )
         if v not in BRAIN_PROVIDERS:
             raise ValueError(
                 f"'{v}' is not a supported brain provider. "
-                f"Use one of: {', '.join(BRAIN_PROVIDERS)}."
+                f"Only local Ollama inference is supported."
             )
         return v
 
@@ -746,6 +768,77 @@ class BrainConfig(BaseModel):
                 f"Use one of: {', '.join(CODEX_REASONING_EFFORTS)}."
             )
         return v
+
+    @field_validator("ollama_base_url", mode="before")
+    @classmethod
+    def _valid_ollama_base_url(cls, v) -> str:
+        v = str(v or "http://127.0.0.1:11434").strip().rstrip("/")
+        if not v:
+            return "http://127.0.0.1:11434"
+        try:
+            parsed = urlparse(v)
+        except Exception as e:
+            raise ValueError(f"Invalid ollama_base_url: {e}")
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"ollama_base_url '{v}' must use http or https scheme.")
+        host = parsed.hostname
+        if not host:
+            raise ValueError(f"ollama_base_url '{v}' must include a valid host.")
+        if not _is_loopback_host(host):
+            raise ValueError(
+                f"ollama_base_url '{v}' must point to a local loopback address "
+                f"(e.g. http://127.0.0.1:11434 or http://localhost:11434)."
+            )
+        return v
+
+    @field_validator("ollama_model", mode="before")
+    @classmethod
+    def _valid_ollama_model(cls, v) -> str:
+        if v is None:
+            return "qwen3:4b-instruct-2507-q4_K_M"
+        v = str(v).strip()
+        if not v or not _MODEL_NAME_RE.match(v):
+            raise ValueError(f"'{v}' is not a valid ollama model name.")
+        return v
+
+    @field_validator("ollama_timeout", mode="before")
+    @classmethod
+    def _valid_ollama_timeout(cls, v) -> float:
+        if v is None:
+            return 120.0
+        try:
+            val = float(v)
+        except (ValueError, TypeError):
+            raise ValueError("ollama_timeout must be a positive number.")
+        if val <= 0:
+            raise ValueError("ollama_timeout must be > 0.")
+        return val
+
+    @field_validator("ollama_temperature", mode="before")
+    @classmethod
+    def _valid_ollama_temperature(cls, v) -> float:
+        if v is None:
+            return 0.2
+        try:
+            val = float(v)
+        except (ValueError, TypeError):
+            raise ValueError("ollama_temperature must be a number between 0.0 and 2.0.")
+        if not (0.0 <= val <= 2.0):
+            raise ValueError("ollama_temperature must be between 0.0 and 2.0.")
+        return val
+
+    @field_validator("ollama_context_length", mode="before")
+    @classmethod
+    def _valid_ollama_context_length(cls, v) -> int:
+        if v is None:
+            return 8192
+        try:
+            val = int(v)
+        except (ValueError, TypeError):
+            raise ValueError("ollama_context_length must be a positive integer.")
+        if val <= 0:
+            raise ValueError("ollama_context_length must be > 0.")
+        return val
 
 
 class WriterConfig(BaseModel):
@@ -961,7 +1054,7 @@ def load_brain_config(config_path: str | None = None) -> BrainConfig:
 
     Training runs before a product is configured (the template sellbird.yaml
     still has placeholder values), but it must still think with the
-    provider the user chose. A missing file or section means the Claude
+    provider the user chose. A missing file or section means the Ollama
     default; an invalid section raises rather than silently switching
     providers.
     """

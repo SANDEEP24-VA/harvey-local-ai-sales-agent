@@ -57,10 +57,10 @@ async def test_paginates_without_changing_query_or_page_size():
 
 @pytest.mark.asyncio
 async def test_heartbeat_does_not_send_until_gmail_recovers(monkeypatch, tmp_path):
-    # The shared harness routes Claude to a canned local Python response,
-    # not a model/CLI service. Its mail send only appends to an in-memory list.
+    # The shared harness routes inference to a canned local response,
+    # not an external cloud service. Its mail send only appends to an in-memory list.
     from tests.test_codex_e2e import Harness, _approved_item
-    sellbird = Harness(monkeypatch, tmp_path, provider='claude', model='')
+    sellbird = Harness(monkeypatch, tmp_path, provider='ollama', model='')
     await sellbird.state.init_db()
     await _approved_item(sellbird.state)
     gmail = provider([None, {'resultSizeEstimate': 0}])
@@ -127,7 +127,7 @@ async def test_http_failures_do_not_become_an_empty_inbox(monkeypatch, status, b
 @pytest.mark.asyncio
 async def test_second_page_opt_out_cancels_approved_send(monkeypatch, tmp_path):
     from tests.test_codex_e2e import Harness, _approved_item
-    sellbird = Harness(monkeypatch, tmp_path, provider='claude', model='')
+    sellbird = Harness(monkeypatch, tmp_path, provider='ollama', model='')
     await sellbird.state.init_db()
     await _approved_item(sellbird.state)
     gmail = provider([

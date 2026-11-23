@@ -22,6 +22,7 @@
     <symbol id="i-companies" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7.5h.01M15 7.5h.01M9 11.5h.01M15 11.5h.01M9 15.5h.01M15 15.5h.01"/></symbol>
     <symbol id="i-contacts" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></symbol>
     <symbol id="i-campaigns" viewBox="0 0 24 24"><path d="M21 3 10 14"/><path d="M21 3 14.5 21l-4.5-7-7-4.5z"/></symbol>
+    <symbol id="i-products" viewBox="0 0 24 24"><path d="m7.5 4.27 9 5.15M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></symbol>
     <symbol id="i-inboxes" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
@@ -81,9 +82,11 @@
       <div class="nav-label">Work</div>
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
       <button onclick="showTab('company', this)"><svg class="icon" aria-hidden="true"><use href="#i-company"/></svg><span class="label">Your company</span><span class="nav-count" id="nav-company"></span></button>
+      <button onclick="showTab('products', this)"><svg class="icon" aria-hidden="true"><use href="#i-products"/></svg><span class="label">Products</span><span class="nav-count" id="nav-products"></span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('inboxes', this)"><svg class="icon" aria-hidden="true"><use href="#i-inboxes"/></svg><span class="label">Inboxes</span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
+      <button onclick="showTab('reply-sim', this)"><svg class="icon" aria-hidden="true"><use href="#i-message"/></svg><span class="label">Reply Simulator</span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Pipeline</div>
@@ -95,6 +98,8 @@
     </div>
     <div class="nav-group">
       <div class="nav-label">System</div>
+      <button onclick="showTab('hardware-view', this)"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg><span class="label">Hardware & Local AI</span><span class="nav-count" id="nav-hw-tier"></span></button>
+      <button onclick="showTab('tasks-view', this)"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span class="label">Task Queue</span><span class="nav-count" id="nav-tasks"></span></button>
       <button onclick="showTab('activity', this)"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span class="label">Activity</span></button>
       <button onclick="showTab('usage', this)"><svg class="icon" aria-hidden="true"><use href="#i-usage"/></svg><span class="label">Usage</span></button>
       <button onclick="showTab('controls', this)"><svg class="icon" aria-hidden="true"><use href="#i-controls"/></svg><span class="label">Controls</span></button>
@@ -173,6 +178,120 @@
     </div>
   </div>
   <div id="company-body" class="company-body"><p class="desc">Loading...</p></div>
+</div>
+
+<!-- Products: Multi-Product Catalog, ICP Generation, and Prospect Intelligence -->
+<div id="products" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Products & Catalog</h2>
+      <p>Manage multi-product offerings, configure product-specific ICPs using local Ollama, and review matched prospects and evidence.</p>
+    </div>
+    <div style="display:flex;gap:var(--sp-2)">
+      <button class="btn btn-primary" onclick="openProductModal()"><svg class="icon" style="width:13px;height:13px"><use href="#i-plus"/></svg>Add Product</button>
+    </div>
+  </div>
+
+  <div class="product-layout">
+    <div class="card product-sidebar-panel">
+      <div style="display:flex;flex-direction:column;gap:var(--sp-2);margin-bottom:var(--sp-3)">
+        <input type="text" id="product-search-input" placeholder="Search products..." oninput="filterProductsList()" class="form-input">
+        <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-caption);color:var(--text-2);cursor:pointer">
+          <input type="checkbox" id="show-archived-checkbox" onchange="loadProducts()"> Show Archived Products
+        </label>
+      </div>
+      <div id="products-list-container" class="products-list-scroll">
+        <p class="desc">Loading products...</p>
+      </div>
+    </div>
+
+    <div class="product-main-panel">
+      <div id="product-empty-state" class="card" style="text-align:center;padding:var(--sp-7) var(--sp-4)">
+        <svg class="icon" style="width:36px;height:36px;color:var(--text-3);margin-bottom:var(--sp-2)"><use href="#i-products"/></svg>
+        <p class="lede" style="font-weight:600">Select a Product</p>
+        <p class="desc" style="max-width:400px;margin:0 auto">Select an offering on the left or add a new product to configure its local AI ICP, generate sales intelligence, and evaluate prospect matches.</p>
+      </div>
+
+      <div id="product-detail-container" style="display:none;flex-direction:column;gap:var(--sp-4)">
+        <!-- Injected via app.js renderProductDetail() -->
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Dialog: Create / Edit Product -->
+<div id="product-modal-dialog" style="display:none;position:fixed;inset:0;z-index:900;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);padding:16px">
+  <div class="card" style="max-width:680px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:var(--shadow-pop)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-4)">
+      <h3 id="product-modal-title" style="margin:0;font-size:var(--fs-h3)">Add Product</h3>
+      <button class="btn btn-secondary" onclick="closeProductModal()" style="padding:4px 8px">&times;</button>
+    </div>
+    <form onsubmit="handleProductFormSubmit(event)">
+      <input type="hidden" id="pm-id">
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:var(--sp-3);margin-bottom:var(--sp-3)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Product Name *</label>
+          <input type="text" id="pm-name" required class="form-input" placeholder="e.g. SalesBot Enterprise">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">SKU / Code</label>
+          <input type="text" id="pm-sku" class="form-input" placeholder="e.g. SB-ENT-01">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);margin-bottom:var(--sp-3)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Category</label>
+          <input type="text" id="pm-category" class="form-input" placeholder="e.g. AI Software, B2B SaaS">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Pricing Model & Details</label>
+          <input type="text" id="pm-pricing" class="form-input" placeholder="e.g. Subscription ($500/seat/mo)">
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:var(--sp-3)">
+        <label class="form-label">Description</label>
+        <textarea id="pm-description" rows="2" class="form-input" placeholder="Product overview and what it solves..."></textarea>
+      </div>
+      <div class="form-group" style="margin-bottom:var(--sp-3)">
+        <label class="form-label">Value Proposition</label>
+        <input type="text" id="pm-value-prop" class="form-input" placeholder="Core 1-sentence value proposition">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);margin-bottom:var(--sp-3)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Key Features (comma-separated)</label>
+          <textarea id="pm-features" rows="2" class="form-input" placeholder="Automated prospecting, Local Ollama, Reply handling"></textarea>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Core Benefits (comma-separated)</label>
+          <textarea id="pm-benefits" rows="2" class="form-input" placeholder="Save 15h/week, 3x meeting rates, Zero cloud LLM risk"></textarea>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);margin-bottom:var(--sp-3)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Target Industries (comma-separated)</label>
+          <input type="text" id="pm-industries" class="form-input" placeholder="Cybersecurity, Fintech, Healthcare">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Target Job Titles (comma-separated)</label>
+          <input type="text" id="pm-titles" class="form-input" placeholder="VP Sales, Head of BD, Founder, CTO">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);margin-bottom:var(--sp-3)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Pain Points Addressed (comma-separated)</label>
+          <textarea id="pm-pains" rows="2" class="form-input" placeholder="Admin burden, Leaking customer data to cloud"></textarea>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Entry Offer / CTA</label>
+          <input type="text" id="pm-offer" class="form-input" placeholder="14-day free trial, 20-min architectural audit">
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:var(--sp-2);margin-top:var(--sp-4)">
+        <button type="button" class="btn btn-secondary" onclick="closeProductModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="pm-submit-btn">Save Product</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <div id="signals" class="section">
@@ -296,6 +415,80 @@
 <div id="conversations" class="section">
   <div class="section-head"><div><h2>Conversations</h2><p>Every reply, and how Sellbird handled it.</p></div></div>
   <div id="conversations-list"></div>
+</div>
+
+<!-- Reply Simulator: Offline Simulation & Intent Classification -->
+<div id="reply-sim" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Reply Simulator & Intent Classifier</h2>
+      <p>Simulate incoming prospect replies offline with zero external cloud calls. Test local Ollama classification, objection handling, and opt-out safety compliance.</p>
+    </div>
+    <div style="display:flex;gap:var(--sp-2)">
+      <span class="tag good" style="display:inline-flex;align-items:center;gap:4px">
+        <svg class="icon" style="width:12px;height:12px"><use href="#i-check"/></svg> Pure Local Ollama
+      </span>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);margin-top:var(--sp-3)">
+    <div class="card">
+      <h3 style="margin-top:0;font-size:var(--fs-h3)">Inbound Prospect Message</h3>
+      <p class="desc" style="margin-bottom:var(--sp-3)">Select a pre-configured B2B scenario or enter a custom prospect response to verify local intent classification.</p>
+
+      <div class="form-group" style="margin-bottom:var(--sp-3)">
+        <label class="form-label" for="sim-scenario-select">Sample Conversation Scenarios</label>
+        <select id="sim-scenario-select" class="form-input" onchange="onSelectSimScenario(this.value)">
+          <option value="">-- Choose a scenario to load --</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="margin-bottom:var(--sp-3)">
+        <label class="form-label" for="sim-incoming-text">Prospect Reply Text *</label>
+        <textarea id="sim-incoming-text" rows="5" class="form-input" placeholder="e.g. Yes, we are actively looking into cloud cost optimization. What times work this Thursday?"></textarea>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);margin-bottom:var(--sp-3)">
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="sim-prospect-name">Prospect Name</label>
+          <input type="text" id="sim-prospect-name" class="form-input" placeholder="e.g. Marcus Chen">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="sim-product-name">Product Context</label>
+          <input type="text" id="sim-product-name" class="form-input" placeholder="e.g. Apex Cloud Optimizer">
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="sim-run-btn" onclick="runSimulateReply()" style="width:100%;justify-content:center;margin-top:var(--sp-2)">
+        <svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg> Classify & Preview Action
+      </button>
+    </div>
+
+    <div class="card" id="sim-result-card" style="display:none;background:var(--surface)">
+      <h3 style="margin-top:0;font-size:var(--fs-h3);display:flex;justify-content:space-between;align-items:center">
+        <span>Agent Decision & Preview</span>
+        <span id="sim-intent-badge" class="tag"></span>
+      </h3>
+
+      <div style="display:flex;flex-direction:column;gap:var(--sp-3);margin-top:var(--sp-3)">
+        <div style="display:flex;gap:var(--sp-3);padding:var(--sp-2) var(--sp-3);background:var(--surface-2);border-radius:var(--r-sm)">
+          <div><span style="font-size:var(--fs-caption);color:var(--text-3)">Stage:</span> <strong id="sim-stage-val" style="font-size:var(--fs-ui)"></strong></div>
+          <div><span style="font-size:var(--fs-caption);color:var(--text-3)">Confidence:</span> <strong id="sim-confidence-val" style="font-size:var(--fs-ui)"></strong></div>
+          <div><span style="font-size:var(--fs-caption);color:var(--text-3)">Opt-Out Safety:</span> <span id="sim-optout-val"></span></div>
+        </div>
+
+        <div>
+          <div class="form-label">Classification Reasoning</div>
+          <p id="sim-reasoning-val" class="desc" style="color:var(--text);background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm);margin:0"></p>
+        </div>
+
+        <div>
+          <div class="form-label">Drafted Follow-up / Response</div>
+          <div id="sim-reply-val" style="font-family:var(--sans);font-size:var(--fs-body);line-height:1.5;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:var(--sp-3);white-space:pre-wrap"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Inboxes -->
@@ -495,6 +688,57 @@
     <div class="card">
       <h2>Recent logs <button class="btn btn-ghost btn-sm" onclick="loadLogs()" style="margin-left:auto"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button></h2>
       <div class="log-viewer" id="log-viewer">No logs yet. Start Sellbird to see activity.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Hardware & Local AI -->
+<div id="hardware-view" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Hardware Profile & Local AI Engine</h2>
+      <p>Automatic device hardware detection, VRAM allocation, and zero-cloud local Ollama model scaling.</p>
+    </div>
+    <div style="display:flex;gap:var(--sp-2)">
+      <button class="btn btn-secondary" onclick="loadHardwareProfileView(true)">
+        <svg class="icon" style="width:13px;height:13px"><use href="#i-refresh"/></svg> Re-scan Hardware
+      </button>
+    </div>
+  </div>
+
+  <div id="hw-profile-container">
+    <p class="desc">Scanning local hardware profile...</p>
+  </div>
+</div>
+
+<!-- Offline Task Queue -->
+<div id="tasks-view" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Offline Task Queue & Web Scraper</h2>
+      <p>Persistent SQLite asynchronous queue with offline replay, SSRF protection, and error isolation.</p>
+    </div>
+    <div style="display:flex;gap:var(--sp-2)">
+      <button class="btn btn-secondary" onclick="loadTaskQueueView()">
+        <svg class="icon" style="width:13px;height:13px"><use href="#i-refresh"/></svg> Refresh Queue
+      </button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:var(--sp-4)">
+    <h3 style="margin-top:0;font-size:var(--fs-h3)">Queue Web Research Task</h3>
+    <p class="desc">Enqueues target URLs for safe, robots.txt-compliant BeautifulSoup parsing and local SQLite caching.</p>
+    <div style="display:flex;gap:var(--sp-2);margin-top:var(--sp-2)">
+      <input type="url" id="queue-url-input" class="form-input" placeholder="https://example.com" style="flex:1">
+      <button class="btn btn-primary" onclick="submitQueueScrapeTask()">Queue Scrape</button>
+    </div>
+    <div id="queue-scrape-result" style="margin-top:var(--sp-2)"></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;font-size:var(--fs-h3)">Task Queue Items</h3>
+    <div id="task-queue-list-container">
+      <p class="desc">Loading queued tasks...</p>
     </div>
   </div>
 </div>

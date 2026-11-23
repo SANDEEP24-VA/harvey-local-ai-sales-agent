@@ -16,7 +16,7 @@ channels:
   email:      { provider: gmail | microsoft | smtp | instantly, max_daily_sends, per_inbox_daily_cap,
                 require_approval, send_to_risky, min_write_score, max_bounce_rate, follow_ups, warmup, send_window, signature }
 usage:        { max_daily_claude_percent, heartbeat_interval_minutes, quiet_hours }
-brain:        { provider: claude | codex, model, reasoning_effort }   # optional; claude by default
+brain:        { provider: ollama | claude | codex, model, ollama_base_url, ollama_model, ollama_timeout, ollama_temperature, ollama_context_length, reasoning_effort }   # optional; ollama by default
 writer:       { humanizer, site_facts, require_tip }   # optional; humanizer true adds one editing pass per batch using ~/.claude/skills/humanizer/SKILL.md
               # site_facts (default true): the Writer sees what the free homepage signals found (no structured data,
               # a stale or very small site, AI crawlers blocked) so an email can name one concrete thing to change.
@@ -35,7 +35,28 @@ sequence, so Claude calls and sends go to the best matches first.
 
 `follow_ups` (default true) set to `false` makes a campaign stage only its first email on Gmail, Microsoft and SMTP. Steps 2 and 3 are never prepared, so none can go out to someone who has not answered. A reply is still read, and the answer waits in the Outbox for you as usual. The Writer still drafts the whole sequence; the Sender just doesn't stage the later steps.
 
-`max_daily_claude_percent` caps whichever subscription `brain.provider` uses (the name predates Codex support).
+`max_daily_claude_percent` caps whichever subscription `brain.provider` uses (the name predates Codex and Ollama support).
+
+### Brain Providers (Local Ollama & Cloud)
+
+Sellbird defaults to **local Ollama inference** (`brain.provider: ollama`), providing free, private, zero-cost AI without cloud API keys or subscriptions.
+
+```yaml
+brain:
+  provider: "ollama"                         # "ollama" (default) | "claude" | "codex"
+  ollama_base_url: "http://127.0.0.1:11434"  # loopback addresses only (security restriction)
+  ollama_model: "qwen3:4b-instruct-2507-q4_K_M" # default local model
+  ollama_timeout: 120                       # timeout in seconds
+  ollama_temperature: 0.2                   # generation temperature (0.0 - 2.0)
+  ollama_context_length: 8192               # context window size
+```
+
+**Security & Zero-Cost Failure Behavior:**
+- **Loopback Enforcement:** The default local Ollama client strictly permits only loopback addresses (`127.0.0.1`, `localhost`, `::1`). Arbitrary external/public URLs are rejected.
+- **Proxy Bypass:** Environment proxies (`HTTP_PROXY`, `HTTPS_PROXY`) are bypassed for local daemon communication.
+- **Strict Zero Cloud Fallback:** If Ollama is unreachable or a model is not installed, Sellbird logs a helpful error and returns a safe empty sentinel. It **never** silently falls back to Claude, Codex, OpenAI, or any cloud API.
+- **Budget Exemption:** Ollama local inference has zero API cost and is never blocked by cloud subscription quotas.
+
 
 If `sellbird.local.yaml` exists it wins. It's gitignored, so a fork can carry real product configuration while the tracked `sellbird.yaml` stays a template — nobody publishes their positioning and pricing by accident.
 

@@ -13,6 +13,9 @@ import logging
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
+
+import httpx
 
 from sellbird.state import StateManager
 
@@ -40,7 +43,7 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
-PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
+PROVIDER_LABELS = {"ollama": "Ollama", "claude": "Claude", "codex": "Codex"}
 
 # Settings key holding the brain's last health transition, for `sellbird
 # status` and the dashboard: {"provider", "status": "ok"|"paused", "reason",
@@ -124,20 +127,24 @@ class Brain:
         self._usage_limited_until = 0.0
         self._usage_pause_recorded = False
         self._status_synced = False
-        if self.provider == "codex":
-            from sellbird.codex import CodexClient, CodexQuotaClient
-            self.codex = CodexClient(
-                model=self.model, reasoning_effort=self.config.reasoning_effort
-            )
-            self.quota = CodexQuotaClient(self.codex)
+        if self.provider == "ollama":
+            self.model = self.model or getattr(self.config, "ollama_model", "qwen3:4b-instruct-2507-q4_K_M")
+            self.ollama_base_url = str(getattr(self.config, "ollama_base_url", "http://127.0.0.1:11434")).rstrip("/")
+            self.ollama_timeout = float(getattr(self.config, "ollama_timeout", 120.0))
+            self.ollama_temperature = float(getattr(self.config, "ollama_temperature", 0.2))
+            self.ollama_context_length = int(getattr(self.config, "ollama_context_length", 8192))
+            self.quota = None
+        elif self.transport is not None:
+            self.quota = None
         else:
-            # Lazy import avoids a cycle (quota -> usage -> state).
-            from sellbird.integrations.quota import QuotaClient
-            self.quota = QuotaClient()
+            self.quota = None
+            self.unavailable = (
+                f"Unsupported brain provider '{self.provider}'. Only local Ollama inference is supported."
+            )
 
     @property
     def provider_label(self) -> str:
-        return PROVIDER_LABELS[self.provider]
+        return PROVIDER_LABELS.get(self.provider, "Ollama")
 
     @property
     def paused_reason(self) -> str:
@@ -148,64 +155,15 @@ class Brain:
             return transport_paused
         if self.unavailable:
             return self.unavailable
-        if time.monotonic() < self._usage_limited_until:
-            return f"{self.provider_label} usage limit reached for this plan"
         return ""
 
     async def preflight(self) -> str:
-        """Can this Brain be used right now? Returns "" or the reason not.
-
-        Codex only (Claude keeps its existing behaviour): runs the adapter's
-        full pre-prompt check (CodexClient.preflight): CLI version, route and
-        lockdown attested with no login in the runtime, the native login read
-        only (expiry, renewal), then with the access-only copy the configured
-        model against the catalog, the ChatGPT account, and a started
-        tool-less thread. No turn, so no inference; nothing is written to the
-        native login. While paused, the check is repeated only when the login
-        file or the Codex executable changes, or every
-        PROVIDER_RECHECK_SECONDS, so a persistent problem doesn't start
-        runtimes every heartbeat.
-        """
-        if self.provider != "codex":
-            return await self._claude_preflight()
-        from sellbird.codex import CodexError
-
-        await self._expire_usage_pause()
-        if self.unavailable:
-            unchanged = self.codex.fingerprint() == self._unavailable_fingerprint
-            recent = time.monotonic() - self._unavailable_at < PROVIDER_RECHECK_SECONDS
-            if unchanged and recent:
-                return self.unavailable
-        try:
-            await self.codex.preflight()
-        except CodexError as e:
-            if e.kind in _PERSISTENT_CODEX_KINDS:
-                await self._mark_unavailable(e)
-                return self.unavailable
-            return str(e)  # transient: skip this cycle, check again next time
-        except Exception as e:
-            return f"Codex preflight failed unexpectedly ({type(e).__name__})."
-        if self.unavailable:
-            await self._mark_available()
-        elif not self._status_synced:
-            logger.info(
-                f"Codex ready: supported CLI, isolation verified, login and account "
-                f"valid, model {self.model or 'auto'} usable with no tools (no prompt sent).")
-            # A pause recorded before a restart must not outlive the problem.
-            self._status_synced = True
-            try:
-                stored = parse_brain_status(await self.state.get_setting(BRAIN_STATUS_KEY))
-            except Exception:
-                stored = {}
-            until = stored.get("until")
-            if (stored.get("status") == "paused" and stored.get("kind") == "usage_limit"
-                    and isinstance(until, (int, float)) and until > time.time()):
-                # Still inside a usage-limit pause recorded before a restart.
-                self._usage_limited_until = time.monotonic() + (until - time.time())
-                self._usage_pause_recorded = True
-            elif stored.get("status") == "paused":
-                await self._mark_available()
-        return ""
+        """Can this Brain be used right now? Returns "" or the reason not."""
+        if self.transport is not None:
+            return ""
+        if self.provider == "ollama":
+            return await self._ollama_preflight()
+        return f"Unsupported brain provider '{self.provider}'. Only local Ollama inference is supported."
 
     async def _claude_preflight(self) -> str:
         """Claude: the installed CLI must support every isolation flag
@@ -223,6 +181,8 @@ class Brain:
         return ""
 
     def _fingerprint(self):
+        if self.provider == "ollama":
+            return (self.ollama_base_url, self.model or getattr(self.config, "ollama_model", ""))
         if self.provider == "codex":
             return self.codex.fingerprint()
         from sellbird.claude_runtime import fingerprint
@@ -263,6 +223,8 @@ class Brain:
         await self._record_status("ok", "")
 
     async def _record_status(self, status: str, reason: str, **extra):
+        if self.state is None:
+            return
         try:
             await self.state.set_setting(BRAIN_STATUS_KEY, json.dumps({
                 "provider": self.provider, "status": status, "reason": reason[:500],
@@ -294,12 +256,27 @@ class Brain:
         if self.transport is not None:
             return await self._think_transport(prompt, expect_json=expect_json,
                                                timeout=timeout, agent=agent, task=task)
-        if self.provider == "codex":
-            return await self._think_codex(
-                prompt, session_id=session_id, timeout=timeout,
-                max_retries=max_retries, agent=agent, task=task,
+        if self.provider == "ollama":
+            return await self._think_ollama(
+                prompt, session_id=session_id, expect_json=expect_json,
+                timeout=timeout, max_retries=max_retries, agent=agent, task=task,
             )
+        logger.error(
+            f"Brain call skipped: unsupported provider '{self.provider}'. "
+            "Only local Ollama inference is supported."
+        )
+        return ""
 
+    async def _think_claude_legacy(
+        self,
+        prompt: str,
+        session_id: str | None = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        agent: str = "",
+        task: str = "",
+    ) -> str:
+        """Historical Claude CLI thinking implementation (disabled)."""
         from sellbird import claude_runtime
 
         # Never start an unisolated call: a CLI missing any isolation flag
@@ -531,6 +508,198 @@ class Brain:
             **result.usage,
         )
 
+    async def _ollama_preflight(self) -> str:
+        """Check whether Ollama is reachable and configured model is installed."""
+        try:
+            parsed = urlparse(self.ollama_base_url)
+            from sellbird.config import _is_loopback_host
+            if parsed.scheme not in ("http", "https") or not _is_loopback_host(parsed.hostname or ""):
+                err = f"Refusing non-loopback Ollama endpoint: {self.ollama_base_url}"
+                await self._mark_unavailable(err)
+                return err
+        except Exception as e:
+            err = f"Invalid Ollama base URL '{self.ollama_base_url}': {e}"
+            await self._mark_unavailable(err)
+            return err
+
+        url = f"{self.ollama_base_url}/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    err = f"Ollama health check returned HTTP {resp.status_code}: {resp.text[:200]}"
+                    await self._mark_unavailable(err)
+                    return err
+                data = resp.json()
+        except httpx.ConnectError:
+            err = f"Ollama daemon is not reachable at {self.ollama_base_url}. Ensure Ollama is running."
+            await self._mark_unavailable(err)
+            return err
+        except httpx.TimeoutException:
+            err = f"Ollama health check at {self.ollama_base_url} timed out."
+            await self._mark_unavailable(err)
+            return err
+        except Exception as e:
+            err = f"Ollama health check failed: {type(e).__name__}: {e}"
+            await self._mark_unavailable(err)
+            return err
+
+        models = data.get("models") or []
+        installed_names = []
+        for m in models:
+            if isinstance(m, dict):
+                name = m.get("name") or ""
+                if name:
+                    installed_names.append(name)
+
+        target_model = self.model or getattr(self.config, "ollama_model", "")
+        model_found = False
+        for inst in installed_names:
+            if inst == target_model:
+                model_found = True
+                break
+            if ":" not in target_model and inst.split(":")[0] == target_model:
+                model_found = True
+                break
+            if ":" in target_model and inst.split(":")[0] == target_model.split(":")[0]:
+                if inst == target_model or inst == f"{target_model}:latest" or target_model == f"{inst}:latest":
+                    model_found = True
+                    break
+
+        if not model_found:
+            err = (
+                f"Configured Ollama model '{target_model}' is not installed. "
+                f"Run 'ollama pull {target_model}' to install it."
+            )
+            await self._mark_unavailable(err)
+            return err
+
+        if self.unavailable:
+            await self._mark_available()
+        return ""
+
+    async def _think_ollama(
+        self,
+        prompt: str,
+        session_id: str | None = None,
+        expect_json: bool = False,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        agent: str = "",
+        task: str = "",
+    ) -> str:
+        """Execute inference against local Ollama daemon.
+
+        Zero cloud fallback. Returns "" on failure.
+        """
+        if self.paused_reason:
+            logger.info(f"Ollama call skipped: {self.paused_reason}")
+            return ""
+
+        model_name = self.model or getattr(self.config, "ollama_model", "")
+        if not model_name:
+            logger.error("Ollama model name is not configured.")
+            return ""
+
+        # Validate local endpoint defense-in-depth
+        try:
+            parsed = urlparse(self.ollama_base_url)
+            from sellbird.config import _is_loopback_host
+            if parsed.scheme not in ("http", "https") or not _is_loopback_host(parsed.hostname or ""):
+                logger.error(f"Refusing non-loopback Ollama endpoint: {self.ollama_base_url}")
+                return ""
+        except Exception as e:
+            logger.error(f"Invalid Ollama base URL '{self.ollama_base_url}': {e}")
+            return ""
+
+        call_timeout = timeout if timeout != DEFAULT_TIMEOUT_SECONDS else self.ollama_timeout
+        endpoint = f"{self.ollama_base_url}/api/chat"
+
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {
+                "temperature": self.ollama_temperature,
+                "num_ctx": self.ollama_context_length,
+            },
+        }
+        if expect_json:
+            payload["format"] = "json"
+
+        last_error = ""
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info(
+                    f"Retrying Ollama call in {delay:.0f}s (attempt {attempt + 1}/{max_retries + 1})..."
+                )
+                await asyncio.sleep(delay)
+
+            try:
+                async with httpx.AsyncClient(timeout=call_timeout, trust_env=False) as client:
+                    resp = await client.post(endpoint, json=payload)
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data.get("message", {}).get("content", "")
+                    if self.unavailable:
+                        await self._mark_available()
+
+                    if self.state:
+                        try:
+                            duration_ms = int(data.get("total_duration", 0) / 1_000_000)
+                            input_tokens = int(data.get("prompt_eval_count", 0))
+                            output_tokens = int(data.get("eval_count", 0))
+                            await self.state.record_usage_event(
+                                agent=agent,
+                                task=task or (session_id or ""),
+                                session_id=session_id or "",
+                                model=model_name,
+                                duration_ms=duration_ms,
+                                num_turns=1,
+                                source="ollama_api",
+                                provider="ollama",
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                cost_usd=0.0,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to record Ollama usage event: {e}")
+
+                    return content
+
+                elif resp.status_code == 404:
+                    err_msg = f"Ollama returned 404: model '{model_name}' not found."
+                    logger.error(err_msg)
+                    await self._mark_unavailable(err_msg)
+                    return ""
+                elif resp.status_code >= 500:
+                    last_error = f"Ollama HTTP {resp.status_code}: {resp.text[:200]}"
+                    logger.warning(f"Ollama server error (attempt {attempt + 1}): {last_error}")
+                    continue
+                else:
+                    last_error = f"Ollama HTTP {resp.status_code}: {resp.text[:200]}"
+                    logger.error(f"Ollama client error: {last_error}")
+                    return ""
+
+            except httpx.ConnectError:
+                err_msg = f"Ollama daemon is not reachable at {self.ollama_base_url}. Ensure Ollama is running."
+                logger.error(err_msg)
+                await self._mark_unavailable(err_msg)
+                return ""
+            except httpx.TimeoutException:
+                last_error = f"Ollama call timed out after {call_timeout}s"
+                logger.warning(f"{last_error} (attempt {attempt + 1})")
+                continue
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                logger.error(f"Unexpected error in Ollama call: {last_error}")
+                return ""
+
+        logger.error(f"Ollama call failed after {max_retries + 1} attempts. Last error: {last_error}")
+        return ""
+
     @staticmethod
     def _parse_result_payload(raw: str) -> tuple[str, dict | None]:
         """Split CLI JSON output into (response_text, result_payload).
@@ -617,7 +786,7 @@ class Brain:
             + "\n\nRespond ONLY with valid JSON. No markdown, no explanation."
         )
         response = await self.think(
-            full_prompt, session_id=session_id, agent=agent, task=task
+            full_prompt, session_id=session_id, expect_json=True, agent=agent, task=task
         )
         self.last_reply_empty = not response
         if not response:
@@ -651,58 +820,23 @@ class Brain:
     async def check_usage(self) -> float:
         """Check today's usage on this Brain's provider (own call count).
 
-        Returns the number of calls made today. Errors are treated as
-        "over budget is unknown" and return a safe 0.0 so a broken DB read
-        doesn't crash the heartbeat.
+        Local Ollama inference has zero cost and no subscription quota limits.
         """
-        try:
-            return await self.state.get_usage_today(provider=self.provider)
-        except Exception as e:
-            logger.warning(f"Could not read usage from state: {e}")
+        if self.provider == "ollama":
             return 0.0
+        return 0.0
 
     async def is_within_budget(
         self, max_daily_calls: int = 200, max_percent: float | None = None
     ) -> bool:
         """Check whether Sellbird may spend more of the active subscription.
 
-        Preferred signal: the account's REAL utilization windows (Claude's
-        `/usage` numbers, or Codex's ChatGPT-plan rate limits), compared
-        against max_percent so Sellbird always leaves the remainder for the
-        user's own interactive work. Fallback when those are unavailable:
-        Sellbird's own call counter for this provider against max_daily_calls.
+        Local Ollama inference runs locally without quota restrictions.
+        Unsupported providers fail closed.
         """
-        await self._expire_usage_pause()
-        if time.monotonic() < self._usage_limited_until:
-            # Codex said the plan is out of usage: an unreadable quota must
-            # not be mistaken for room to spend.
-            logger.info(f"{self.paused_reason}; waiting for it to reset.")
-            return False
-        if max_percent is not None:
-            try:
-                windows = await self.quota.get_utilization()
-            except Exception as e:
-                logger.debug(f"Quota check errored: {e}")
-                windows = None
-            if windows:
-                worst = max(
-                    (w["utilization"] for w in windows.values()), default=0.0
-                )
-                within = worst < max_percent
-                if not within:
-                    resets = ", ".join(
-                        f"{name} resets {w['resets_at']}"
-                        for name, w in windows.items()
-                        if w.get("resets_at")
-                    )
-                    logger.info(
-                        f"{self.provider_label} quota gate: utilization {worst:.0f}% >= "
-                        f"{max_percent:.0f}% limit. {resets}"
-                    )
-                return within
-
-        calls = await self.check_usage()
-        return calls < max_daily_calls
+        if self.provider == "ollama":
+            return True
+        return False
 
     async def _think_transport(self, prompt: str, *, expect_json: bool, timeout: float,
                                agent: str, task: str) -> str:

@@ -22,6 +22,20 @@ from sellbird.models.company import Company
 from sellbird.models.prospect import Prospect
 from sellbird.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from sellbird.models.conversation import Conversation, Message  # noqa: F401
+from sellbird.models.product import (
+    Product,
+    ProductCreate,
+    ProductICP,
+    ProductResearchEvidence,
+    ProspectProductMatch,
+)
+from sellbird.models.business_profile import CompanyBusinessProfile
+from sellbird.models.research import (
+    ClassifiedBuyingSignal,
+    OfflineTask,
+    ProspectProblemStatement,
+    ResearchCacheItem,
+)
 
 from sellbird.paths import PROJECT_ROOT
 from sellbird.startups import parse_funding
@@ -558,10 +572,181 @@ MIGRATIONS: list[str] = [
     ALTER TABLE conversations ADD COLUMN mailbox_id TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_outbox_mailbox_sent ON outbox(mailbox_id, status, sent_at);
     """,
+    # ── v17: multi-product architecture and product intelligence ──
+    # First-class multi-product management, product-specific ICPs,
+    # prospect-product matches, traceable research evidence, and associations
+    # for campaigns, outbox items, and conversations via nullable FKs.
+    """
+    CREATE TABLE IF NOT EXISTS products (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        sku TEXT DEFAULT '',
+        category TEXT DEFAULT '',
+        description TEXT DEFAULT '',
+        pricing_model TEXT DEFAULT '',
+        pricing_details TEXT DEFAULT '',
+        features_json TEXT DEFAULT '[]',
+        benefits_json TEXT DEFAULT '[]',
+        target_industries_json TEXT DEFAULT '[]',
+        target_customer_sizes_json TEXT DEFAULT '[]',
+        target_job_titles_json TEXT DEFAULT '[]',
+        pain_points_json TEXT DEFAULT '[]',
+        value_proposition TEXT DEFAULT '',
+        competitors_json TEXT DEFAULT '[]',
+        objection_responses_json TEXT DEFAULT '{}',
+        entry_offer TEXT DEFAULT '',
+        is_active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_products_active ON products(is_active);
+    CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+
+    CREATE TABLE IF NOT EXISTS product_icps (
+        id TEXT PRIMARY KEY,
+        product_id TEXT NOT NULL UNIQUE REFERENCES products(id) ON DELETE CASCADE,
+        target_industries_json TEXT DEFAULT '[]',
+        company_size TEXT DEFAULT '',
+        revenue_range TEXT DEFAULT '',
+        job_titles_json TEXT DEFAULT '[]',
+        technologies_json TEXT DEFAULT '[]',
+        business_characteristics_json TEXT DEFAULT '[]',
+        pain_points_json TEXT DEFAULT '[]',
+        buying_signals_json TEXT DEFAULT '[]',
+        exclusion_criteria_json TEXT DEFAULT '[]',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_icps_product ON product_icps(product_id);
+
+    CREATE TABLE IF NOT EXISTS prospect_product_matches (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+        product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        fit_score REAL DEFAULT 0.0,
+        matching_reasons_json TEXT DEFAULT '[]',
+        matching_status TEXT DEFAULT 'matched',
+        ai_analysis_json TEXT DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_prospect_product
+        ON prospect_product_matches(prospect_id, product_id);
+    CREATE INDEX IF NOT EXISTS idx_ppm_prospect ON prospect_product_matches(prospect_id);
+    CREATE INDEX IF NOT EXISTS idx_ppm_product ON prospect_product_matches(product_id);
+    CREATE INDEX IF NOT EXISTS idx_ppm_score ON prospect_product_matches(product_id, fit_score DESC);
+    CREATE INDEX IF NOT EXISTS idx_ppm_status ON prospect_product_matches(product_id, matching_status);
+
+    CREATE TABLE IF NOT EXISTS product_research_evidence (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+        product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        evidence_source TEXT DEFAULT '',
+        evidence_url TEXT DEFAULT '',
+        evidence_description TEXT DEFAULT '',
+        buying_signal TEXT DEFAULT '',
+        retrieval_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_pre_prospect_product
+        ON product_research_evidence(prospect_id, product_id);
+    CREATE INDEX IF NOT EXISTS idx_pre_product ON product_research_evidence(product_id);
+    CREATE INDEX IF NOT EXISTS idx_pre_prospect ON product_research_evidence(prospect_id);
+
+    ALTER TABLE campaigns ADD COLUMN product_id TEXT NULL REFERENCES products(id);
+    ALTER TABLE outbox ADD COLUMN product_id TEXT NULL REFERENCES products(id);
+    ALTER TABLE conversations ADD COLUMN product_id TEXT NULL REFERENCES products(id);
+
+    CREATE INDEX IF NOT EXISTS idx_campaigns_product ON campaigns(product_id);
+    CREATE INDEX IF NOT EXISTS idx_outbox_product ON outbox(product_id);
+    CREATE INDEX IF NOT EXISTS idx_conversations_product ON conversations(product_id);
+    """,
+    # ── v18: EDXSO Milestone: Persistent Research Cache, Business Profiles,
+    # Buying Signals, Prospect Problem Statements, and Offline Task Queue ──
+    """
+    CREATE TABLE IF NOT EXISTS company_business_profiles (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        summary TEXT DEFAULT '',
+        business_model TEXT DEFAULT '',
+        core_offerings_json TEXT DEFAULT '[]',
+        target_markets_json TEXT DEFAULT '[]',
+        tech_stack_json TEXT DEFAULT '[]',
+        operational_scale TEXT DEFAULT '',
+        raw_profile_json TEXT DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_cbp_company ON company_business_profiles(company_id);
+
+    CREATE TABLE IF NOT EXISTS research_cache (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL UNIQUE,
+        domain TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        content_type TEXT DEFAULT 'text/html',
+        raw_content TEXT DEFAULT '',
+        extracted_text TEXT DEFAULT '',
+        metadata_json TEXT DEFAULT '{}',
+        status_code INTEGER DEFAULT 200,
+        retrieved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_rc_domain ON research_cache(domain);
+    CREATE INDEX IF NOT EXISTS idx_rc_hash ON research_cache(content_hash);
+
+    CREATE TABLE IF NOT EXISTS classified_buying_signals (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+        product_id TEXT NULL REFERENCES products(id) ON DELETE SET NULL,
+        signal_code TEXT NOT NULL,
+        category TEXT DEFAULT '',
+        result TEXT DEFAULT '',
+        confidence REAL DEFAULT 0.0,
+        supporting_evidence TEXT DEFAULT '',
+        source_url TEXT DEFAULT '',
+        retrieval_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        verification_status TEXT DEFAULT 'unverified',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_cbs_prospect ON classified_buying_signals(prospect_id);
+    CREATE INDEX IF NOT EXISTS idx_cbs_product ON classified_buying_signals(product_id);
+    CREATE INDEX IF NOT EXISTS idx_cbs_code ON classified_buying_signals(signal_code);
+
+    CREATE TABLE IF NOT EXISTS prospect_problem_statements (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+        product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        business_problem TEXT DEFAULT '',
+        pain_points_json TEXT DEFAULT '[]',
+        business_impact TEXT DEFAULT '',
+        product_benefits_json TEXT DEFAULT '[]',
+        value_proposition TEXT DEFAULT '',
+        personalisation_angle TEXT DEFAULT '',
+        recommendation_reason TEXT DEFAULT '',
+        evidence_citations_json TEXT DEFAULT '[]',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pps_prospect_product
+        ON prospect_problem_statements(prospect_id, product_id);
+    CREATE INDEX IF NOT EXISTS idx_pps_prospect ON prospect_problem_statements(prospect_id);
+    CREATE INDEX IF NOT EXISTS idx_pps_product ON prospect_problem_statements(product_id);
+
+    CREATE TABLE IF NOT EXISTS offline_task_queue (
+        id TEXT PRIMARY KEY,
+        task_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT DEFAULT 'pending',
+        retry_count INTEGER DEFAULT 0,
+        error_message TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_otq_status ON offline_task_queue(status, task_type);
+    """,
 ]
 
-BRAIN_PROVIDERS = ("claude", "codex")
-_USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
+BRAIN_PROVIDERS = ("ollama", "claude", "codex")
+_USAGE_LOG_COLUMN = {"ollama": "claude_calls", "claude": "claude_calls", "codex": "codex_calls"}
 
 # When a company was last profiled: the newer of the explicit check stamp
 # (set on every attempt, reachable or not) and its latest profile observation
@@ -579,11 +764,28 @@ _LAST_PROFILED = (
 # Column whitelists for dynamic UPDATEs (prevents SQL injection via kwargs).
 _CAMPAIGN_COLUMNS = frozenset({
     "name", "channel", "instantly_campaign_id",
-    "sequence_json", "prospect_ids_json", "status",
+    "sequence_json", "prospect_ids_json", "status", "product_id",
 })
 _CONVERSATION_COLUMNS = frozenset({
     "prospect_id", "campaign_id", "channel",
-    "thread_json", "intent", "stage", "status", "mailbox_id",
+    "thread_json", "intent", "stage", "status", "mailbox_id", "product_id",
+})
+_PRODUCT_COLUMNS = frozenset({
+    "name", "sku", "category", "description",
+    "pricing_model", "pricing_details", "features_json",
+    "benefits_json", "target_industries_json", "target_customer_sizes_json",
+    "target_job_titles_json", "pain_points_json", "value_proposition",
+    "competitors_json", "objection_responses_json", "entry_offer",
+    "is_active",
+})
+_BUSINESS_PROFILE_COLUMNS = frozenset({
+    "summary", "business_model", "core_offerings_json", "target_markets_json",
+    "tech_stack_json", "operational_scale", "raw_profile_json",
+})
+_PROBLEM_STATEMENT_COLUMNS = frozenset({
+    "business_problem", "pain_points_json", "business_impact",
+    "product_benefits_json", "value_proposition", "personalisation_angle",
+    "recommendation_reason", "evidence_citations_json",
 })
 
 
@@ -1067,6 +1269,7 @@ class StateManager:
         in_reply_to: str = "",
         approved_by: str = "",
         mailbox_id: str = "",
+        product_id: str | None = None,
     ) -> str | None:
         """Queue one outgoing email. Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard.
@@ -1078,12 +1281,13 @@ class StateManager:
                 """INSERT OR IGNORE INTO outbox
                    (id, campaign_id, prospect_id, conversation_id, step, kind,
                     to_email, subject, body, status, send_at, provider,
-                    thread_ref, in_reply_to, mailbox_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    thread_ref, in_reply_to, mailbox_id, product_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id, campaign_id, prospect_id, conversation_id,
                     int(step), kind, _norm(to_email), subject, body,
                     status, send_at, provider, thread_ref, in_reply_to, mailbox_id or "",
+                    product_id,
                 ),
             )
             if cursor.rowcount > 0 and approved_by:
@@ -1236,7 +1440,7 @@ class StateManager:
 
     _OUTBOX_COLUMNS = frozenset({
         "status", "error", "message_id", "thread_ref", "sent_at",
-        "subject", "body", "send_at", "provider", "mailbox_id",
+        "subject", "body", "send_at", "provider", "mailbox_id", "product_id",
     })
 
     async def update_outbox_item(self, item_id: str, **kwargs):
@@ -2439,13 +2643,14 @@ class StateManager:
             await db.execute(
                 """INSERT INTO campaigns
                    (id, name, channel, instantly_campaign_id, sequence_json,
-                    prospect_ids_json, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    prospect_ids_json, status, created_at, product_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     campaign.id, campaign.name, campaign.channel,
                     campaign.instantly_campaign_id, campaign.sequence_json(),
                     json.dumps(campaign.prospect_ids), campaign.status,
                     campaign.created_at.isoformat(),
+                    campaign.product_id,
                 ),
             )
             await db.commit()
@@ -2490,13 +2695,14 @@ class StateManager:
             await db.execute(
                 """INSERT INTO conversations
                    (id, prospect_id, campaign_id, channel, thread_json,
-                    intent, stage, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    intent, stage, status, created_at, updated_at, product_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     convo.id, convo.prospect_id, convo.campaign_id,
                     convo.channel, convo.thread_json(), convo.intent,
                     convo.stage, convo.status, convo.created_at.isoformat(),
                     convo.updated_at.isoformat(),
+                    convo.product_id,
                 ),
             )
             await db.commit()
@@ -2607,9 +2813,9 @@ class StateManager:
 
     # ── Usage Tracking ──
 
-    async def get_usage_today(self, provider: str = "claude") -> int:
+    async def get_usage_today(self, provider: str = "ollama") -> int:
         """Brain calls made today on one provider's subscription."""
-        column = _USAGE_LOG_COLUMN[provider]
+        column = _USAGE_LOG_COLUMN.get(provider, "claude_calls")
         today = date.today().isoformat()
         async with self._connect() as db:
             async with db.execute(
@@ -2618,8 +2824,8 @@ class StateManager:
                 row = await cursor.fetchone()
                 return (row[0] or 0) if row else 0
 
-    async def increment_usage(self, provider: str = "claude"):
-        column = _USAGE_LOG_COLUMN[provider]
+    async def increment_usage(self, provider: str = "ollama"):
+        column = _USAGE_LOG_COLUMN.get(provider, "claude_calls")
         today = date.today().isoformat()
         async with self._connect() as db:
             await db.execute(
@@ -2650,7 +2856,7 @@ class StateManager:
         is_error: bool = False,
         source: str = "result_json",
         created_at: str | None = None,
-        provider: str = "claude",
+        provider: str = "ollama",
     ) -> bool:
         """Insert one usage row (one model within one brain call).
 
@@ -2809,4 +3015,681 @@ class StateManager:
             # Claude budget the rest of the loop is rationing.
             "unprofiled": await self.count_companies_needing_profile(),
         }
+
+    # ── Products ──
+
+    @staticmethod
+    def _product_from_row(row: aiosqlite.Row) -> Product:
+        d = dict(row)
+        for json_col, field in (
+            ("features_json", "features"),
+            ("benefits_json", "benefits"),
+            ("target_industries_json", "target_industries"),
+            ("target_customer_sizes_json", "target_customer_sizes"),
+            ("target_job_titles_json", "target_job_titles"),
+            ("pain_points_json", "pain_points"),
+            ("competitors_json", "competitors"),
+        ):
+            raw = d.pop(json_col, None)
+            try:
+                parsed = json.loads(raw) if raw else []
+            except (json.JSONDecodeError, TypeError):
+                parsed = []
+            d[field] = parsed if isinstance(parsed, list) else []
+
+        raw_obj = d.pop("objection_responses_json", None)
+        try:
+            parsed_obj = json.loads(raw_obj) if raw_obj else {}
+        except (json.JSONDecodeError, TypeError):
+            parsed_obj = {}
+        d["objection_responses"] = parsed_obj if isinstance(parsed_obj, dict) else {}
+        d["is_active"] = bool(d.get("is_active", 1))
+        return Product(**d)
+
+    async def add_product(self, product: Product | ProductCreate) -> str:
+        """Create a new product record."""
+        prod_id = getattr(product, "id", None) or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO products (
+                    id, name, sku, category, description, pricing_model,
+                    pricing_details, features_json, benefits_json,
+                    target_industries_json, target_customer_sizes_json,
+                    target_job_titles_json, pain_points_json, value_proposition,
+                    competitors_json, objection_responses_json, entry_offer,
+                    is_active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    prod_id,
+                    product.name,
+                    product.sku or "",
+                    product.category or "",
+                    product.description or "",
+                    product.pricing_model or "",
+                    product.pricing_details or "",
+                    json.dumps(product.features or []),
+                    json.dumps(product.benefits or []),
+                    json.dumps(product.target_industries or []),
+                    json.dumps(product.target_customer_sizes or []),
+                    json.dumps(product.target_job_titles or []),
+                    json.dumps(product.pain_points or []),
+                    product.value_proposition or "",
+                    json.dumps(product.competitors or []),
+                    json.dumps(product.objection_responses or {}),
+                    product.entry_offer or "",
+                    1 if product.is_active else 0,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return prod_id
+
+    async def get_product(self, product_id: str) -> Product | None:
+        """Retrieve a product by its ID."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cursor:
+                row = await cursor.fetchone()
+                return self._product_from_row(row) if row else None
+
+    async def list_products(self, include_archived: bool = False) -> list[Product]:
+        """List products, optionally including archived products."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            query = "SELECT * FROM products" if include_archived else "SELECT * FROM products WHERE is_active = 1"
+            query += " ORDER BY created_at DESC"
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+                return [self._product_from_row(r) for r in rows]
+
+    async def update_product(self, product_id: str, **kwargs) -> bool:
+        """Update whitelisted product fields."""
+        if not kwargs:
+            return False
+        mapped = {}
+        for k, v in kwargs.items():
+            if k in ("features", "benefits", "target_industries", "target_customer_sizes",
+                     "target_job_titles", "pain_points", "competitors"):
+                mapped[f"{k}_json"] = json.dumps(v if isinstance(v, list) else [])
+            elif k == "objection_responses":
+                mapped["objection_responses_json"] = json.dumps(v if isinstance(v, dict) else {})
+            elif k == "is_active":
+                mapped["is_active"] = 1 if v else 0
+            else:
+                mapped[k] = v
+
+        invalid = set(mapped) - _PRODUCT_COLUMNS
+        if invalid:
+            raise ValueError(f"Invalid product column(s): {sorted(invalid)}")
+
+        now = _utcnow()
+        mapped["updated_at"] = now.isoformat()
+        set_clause = ", ".join(f"{col} = ?" for col in mapped)
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"UPDATE products SET {set_clause} WHERE id = ?",
+                (*mapped.values(), product_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def archive_product(self, product_id: str) -> bool:
+        """Soft-delete/archive a product."""
+        return await self.update_product(product_id, is_active=False)
+
+    # ── Product ICPs ──
+
+    @staticmethod
+    def _product_icp_from_row(row: aiosqlite.Row) -> ProductICP:
+        d = dict(row)
+        for json_col, field in (
+            ("target_industries_json", "target_industries"),
+            ("job_titles_json", "job_titles"),
+            ("technologies_json", "technologies"),
+            ("business_characteristics_json", "business_characteristics"),
+            ("pain_points_json", "pain_points"),
+            ("buying_signals_json", "buying_signals"),
+            ("exclusion_criteria_json", "exclusion_criteria"),
+        ):
+            raw = d.pop(json_col, None)
+            try:
+                parsed = json.loads(raw) if raw else []
+            except (json.JSONDecodeError, TypeError):
+                parsed = []
+            d[field] = parsed if isinstance(parsed, list) else []
+        return ProductICP(**d)
+
+    async def add_or_update_product_icp(self, icp: ProductICP) -> str:
+        """Insert or update a product's ICP configuration."""
+        icp_id = icp.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO product_icps (
+                    id, product_id, target_industries_json, company_size,
+                    revenue_range, job_titles_json, technologies_json,
+                    business_characteristics_json, pain_points_json,
+                    buying_signals_json, exclusion_criteria_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(product_id) DO UPDATE SET
+                    target_industries_json = excluded.target_industries_json,
+                    company_size = excluded.company_size,
+                    revenue_range = excluded.revenue_range,
+                    job_titles_json = excluded.job_titles_json,
+                    technologies_json = excluded.technologies_json,
+                    business_characteristics_json = excluded.business_characteristics_json,
+                    pain_points_json = excluded.pain_points_json,
+                    buying_signals_json = excluded.buying_signals_json,
+                    exclusion_criteria_json = excluded.exclusion_criteria_json,
+                    updated_at = excluded.updated_at""",
+                (
+                    icp_id,
+                    icp.product_id,
+                    json.dumps(icp.target_industries),
+                    icp.company_size,
+                    icp.revenue_range,
+                    json.dumps(icp.job_titles),
+                    json.dumps(icp.technologies),
+                    json.dumps(icp.business_characteristics),
+                    json.dumps(icp.pain_points),
+                    json.dumps(icp.buying_signals),
+                    json.dumps(icp.exclusion_criteria),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return icp_id
+
+    async def get_product_icp(self, product_id: str) -> ProductICP | None:
+        """Retrieve the ICP configuration for a product."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM product_icps WHERE product_id = ?", (product_id,)) as cursor:
+                row = await cursor.fetchone()
+                return self._product_icp_from_row(row) if row else None
+
+    # ── Prospect-Product Matches & Evidence ──
+
+    @staticmethod
+    def _match_from_row(row: aiosqlite.Row) -> ProspectProductMatch:
+        d = dict(row)
+        raw_reasons = d.pop("matching_reasons_json", None)
+        try:
+            reasons = json.loads(raw_reasons) if raw_reasons else []
+        except (json.JSONDecodeError, TypeError):
+            reasons = []
+        d["matching_reasons"] = reasons if isinstance(reasons, list) else []
+
+        raw_analysis = d.pop("ai_analysis_json", None)
+        try:
+            analysis = json.loads(raw_analysis) if raw_analysis else {}
+        except (json.JSONDecodeError, TypeError):
+            analysis = {}
+        d["ai_analysis"] = analysis if isinstance(analysis, dict) else {}
+        return ProspectProductMatch(**d)
+
+    async def add_prospect_product_match(self, match: ProspectProductMatch) -> str:
+        """Record or update a prospect-product match."""
+        m_id = match.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO prospect_product_matches (
+                    id, prospect_id, product_id, fit_score,
+                    matching_reasons_json, matching_status, ai_analysis_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(prospect_id, product_id) DO UPDATE SET
+                    fit_score = excluded.fit_score,
+                    matching_reasons_json = excluded.matching_reasons_json,
+                    matching_status = excluded.matching_status,
+                    ai_analysis_json = excluded.ai_analysis_json,
+                    updated_at = excluded.updated_at""",
+                (
+                    m_id,
+                    match.prospect_id,
+                    match.product_id,
+                    float(match.fit_score),
+                    json.dumps(match.matching_reasons),
+                    match.matching_status,
+                    json.dumps(match.ai_analysis),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return m_id
+
+    async def get_prospect_product_matches(
+        self,
+        product_id: str | None = None,
+        prospect_id: str | None = None,
+        min_score: float = 0.0,
+    ) -> list[ProspectProductMatch]:
+        """Query matches with optional filters."""
+        where = ["fit_score >= ?"]
+        params: list[Any] = [min_score]
+        if product_id:
+            where.append("product_id = ?")
+            params.append(product_id)
+        if prospect_id:
+            where.append("prospect_id = ?")
+            params.append(prospect_id)
+        where_sql = " AND ".join(where)
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM prospect_product_matches WHERE {where_sql} ORDER BY fit_score DESC, updated_at DESC",
+                tuple(params),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._match_from_row(r) for r in rows]
+
+    async def get_prospect_product_match(self, prospect_id: str, product_id: str) -> ProspectProductMatch | None:
+        """Get match for specific prospect and product."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM prospect_product_matches WHERE prospect_id = ? AND product_id = ?",
+                (prospect_id, product_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return self._match_from_row(row) if row else None
+
+    async def add_product_research_evidence(self, evidence: ProductResearchEvidence) -> str:
+        """Store traceable evidence supporting prospect-product match."""
+        ev_id = evidence.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO product_research_evidence (
+                    id, prospect_id, product_id, evidence_source,
+                    evidence_url, evidence_description, buying_signal,
+                    retrieval_timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ev_id,
+                    evidence.prospect_id,
+                    evidence.product_id,
+                    evidence.evidence_source,
+                    evidence.evidence_url,
+                    evidence.evidence_description,
+                    evidence.buying_signal,
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return ev_id
+
+    async def get_product_research_evidence(
+        self, product_id: str, prospect_id: str | None = None
+    ) -> list[ProductResearchEvidence]:
+        """Retrieve evidence items for a product."""
+        params = [product_id]
+        where = "product_id = ?"
+        if prospect_id:
+            where += " AND prospect_id = ?"
+            params.append(prospect_id)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM product_research_evidence WHERE {where} ORDER BY retrieval_timestamp DESC",
+                tuple(params),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [ProductResearchEvidence(**dict(r)) for r in rows]
+
+    # ── Business Profiles ─────────────────────────────────────────────
+
+    async def save_business_profile(self, profile: CompanyBusinessProfile) -> str:
+        """Upsert an AI-synthesized business profile for a company."""
+        prof_id = profile.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO company_business_profiles (
+                    id, company_id, summary, business_model,
+                    core_offerings_json, target_markets_json, tech_stack_json,
+                    operational_scale, raw_profile_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(company_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    business_model = excluded.business_model,
+                    core_offerings_json = excluded.core_offerings_json,
+                    target_markets_json = excluded.target_markets_json,
+                    tech_stack_json = excluded.tech_stack_json,
+                    operational_scale = excluded.operational_scale,
+                    raw_profile_json = excluded.raw_profile_json,
+                    updated_at = excluded.updated_at""",
+                (
+                    prof_id,
+                    profile.company_id,
+                    profile.summary,
+                    profile.business_model,
+                    profile.core_offerings_json(),
+                    profile.target_markets_json(),
+                    profile.tech_stack_json(),
+                    profile.operational_scale,
+                    profile.raw_profile_json(),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return prof_id
+
+    async def get_business_profile(self, company_id: str) -> CompanyBusinessProfile | None:
+        """Fetch business profile for a company."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM company_business_profiles WHERE company_id = ?",
+                (company_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["core_offerings"] = json.loads(d.pop("core_offerings_json", "[]"))
+                d["target_markets"] = json.loads(d.pop("target_markets_json", "[]"))
+                d["tech_stack"] = json.loads(d.pop("tech_stack_json", "[]"))
+                d["raw_profile"] = json.loads(d.pop("raw_profile_json", "{}"))
+                return CompanyBusinessProfile(**d)
+
+    # ── Research Cache ────────────────────────────────────────────────
+
+    async def save_research_cache(self, item: ResearchCacheItem) -> str:
+        """Save downloaded website content into persistent local cache."""
+        item_id = item.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO research_cache (
+                    id, url, domain, content_hash, content_type,
+                    raw_content, extracted_text, metadata_json,
+                    status_code, retrieved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    domain = excluded.domain,
+                    content_hash = excluded.content_hash,
+                    content_type = excluded.content_type,
+                    raw_content = excluded.raw_content,
+                    extracted_text = excluded.extracted_text,
+                    metadata_json = excluded.metadata_json,
+                    status_code = excluded.status_code,
+                    retrieved_at = excluded.retrieved_at""",
+                (
+                    item_id,
+                    item.url,
+                    item.domain,
+                    item.content_hash,
+                    item.content_type,
+                    item.raw_content,
+                    item.extracted_text,
+                    item.metadata_json(),
+                    item.status_code,
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return item_id
+
+    async def get_research_cache(self, url: str) -> ResearchCacheItem | None:
+        """Retrieve cached research by URL."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM research_cache WHERE url = ?",
+                (url,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["metadata"] = json.loads(d.pop("metadata_json", "{}"))
+                return ResearchCacheItem(**d)
+
+    async def list_research_cache(
+        self, domain: str | None = None, limit: int = 50
+    ) -> list[ResearchCacheItem]:
+        """List cached research items, optionally filtered by domain."""
+        where = "1=1"
+        params = []
+        if domain:
+            where += " AND domain = ?"
+            params.append(domain)
+        params.append(limit)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM research_cache WHERE {where} ORDER BY retrieved_at DESC LIMIT ?",
+                tuple(params),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for r in rows:
+                    d = dict(r)
+                    d["metadata"] = json.loads(d.pop("metadata_json", "{}"))
+                    results.append(ResearchCacheItem(**d))
+                return results
+
+    # ── Classified Buying Signals ─────────────────────────────────────
+
+    async def add_classified_buying_signal(self, signal: ClassifiedBuyingSignal) -> str:
+        """Store evidence-grounded buying signal classification."""
+        sig_id = signal.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO classified_buying_signals (
+                    id, prospect_id, product_id, signal_code, category,
+                    result, confidence, supporting_evidence, source_url,
+                    retrieval_timestamp, verification_status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    sig_id,
+                    signal.prospect_id,
+                    signal.product_id,
+                    signal.signal_code,
+                    signal.category,
+                    signal.result,
+                    signal.confidence,
+                    signal.supporting_evidence,
+                    signal.source_url,
+                    now.isoformat(),
+                    signal.verification_status,
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return sig_id
+
+    async def get_classified_buying_signals(
+        self, prospect_id: str, product_id: str | None = None
+    ) -> list[ClassifiedBuyingSignal]:
+        """Fetch classified buying signals for a prospect."""
+        where = "prospect_id = ?"
+        params = [prospect_id]
+        if product_id:
+            where += " AND (product_id = ? OR product_id IS NULL)"
+            params.append(product_id)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM classified_buying_signals WHERE {where} ORDER BY confidence DESC, created_at DESC",
+                tuple(params),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [ClassifiedBuyingSignal(**dict(r)) for r in rows]
+
+    # ── Prospect Problem Statements ───────────────────────────────────
+
+    async def save_prospect_problem_statement(
+        self, statement: ProspectProblemStatement
+    ) -> str:
+        """Save or update prospect-specific problem statement and product alignment."""
+        stmt_id = statement.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO prospect_problem_statements (
+                    id, prospect_id, product_id, business_problem,
+                    pain_points_json, business_impact, product_benefits_json,
+                    value_proposition, personalisation_angle,
+                    recommendation_reason, evidence_citations_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(prospect_id, product_id) DO UPDATE SET
+                    business_problem = excluded.business_problem,
+                    pain_points_json = excluded.pain_points_json,
+                    business_impact = excluded.business_impact,
+                    product_benefits_json = excluded.product_benefits_json,
+                    value_proposition = excluded.value_proposition,
+                    personalisation_angle = excluded.personalisation_angle,
+                    recommendation_reason = excluded.recommendation_reason,
+                    evidence_citations_json = excluded.evidence_citations_json,
+                    updated_at = excluded.updated_at""",
+                (
+                    stmt_id,
+                    statement.prospect_id,
+                    statement.product_id,
+                    statement.business_problem,
+                    statement.pain_points_json(),
+                    statement.business_impact,
+                    statement.product_benefits_json(),
+                    statement.value_proposition,
+                    statement.personalisation_angle,
+                    statement.recommendation_reason,
+                    statement.evidence_citations_json(),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return stmt_id
+
+    async def get_prospect_problem_statement(
+        self, prospect_id: str, product_id: str
+    ) -> ProspectProblemStatement | None:
+        """Get prospect-specific problem statement for a product."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM prospect_problem_statements WHERE prospect_id = ? AND product_id = ?",
+                (prospect_id, product_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["pain_points"] = json.loads(d.pop("pain_points_json", "[]"))
+                d["product_benefits"] = json.loads(d.pop("product_benefits_json", "[]"))
+                d["evidence_citations"] = json.loads(d.pop("evidence_citations_json", "[]"))
+                return ProspectProblemStatement(**d)
+
+    async def list_prospect_problem_statements(
+        self, product_id: str | None = None, limit: int = 50
+    ) -> list[ProspectProblemStatement]:
+        """List prospect problem statements."""
+        where = "1=1"
+        params = []
+        if product_id:
+            where += " AND product_id = ?"
+            params.append(product_id)
+        params.append(limit)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM prospect_problem_statements WHERE {where} ORDER BY updated_at DESC LIMIT ?",
+                tuple(params),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for r in rows:
+                    d = dict(r)
+                    d["pain_points"] = json.loads(d.pop("pain_points_json", "[]"))
+                    d["product_benefits"] = json.loads(d.pop("product_benefits_json", "[]"))
+                    d["evidence_citations"] = json.loads(d.pop("evidence_citations_json", "[]"))
+                    results.append(ProspectProblemStatement(**d))
+                return results
+
+    # ── Offline Task Queue ────────────────────────────────────────────
+
+    async def queue_offline_task(
+        self,
+        task: OfflineTask | None = None,
+        task_type: str = "",
+        payload: dict | None = None,
+    ) -> str:
+        """Queue a failed or deferred local AI task for offline processing."""
+        if task is None:
+            task = OfflineTask(task_type=task_type, payload=payload or {})
+        task_id = task.id or _new_id()
+        now = _utcnow()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO offline_task_queue (
+                    id, task_type, payload_json, status,
+                    retry_count, error_message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    task.task_type,
+                    task.payload_json(),
+                    task.status,
+                    task.retry_count,
+                    task.error_message,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            await db.commit()
+        return task_id
+
+    async def get_pending_offline_tasks(self, task_type: str | None = None, limit: int = 50) -> list[OfflineTask]:
+        """Fetch pending offline tasks for processing."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if task_type:
+                query = "SELECT * FROM offline_task_queue WHERE status = 'pending' AND task_type = ? ORDER BY created_at ASC LIMIT ?"
+                params = (task_type, limit)
+            else:
+                query = "SELECT * FROM offline_task_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?"
+                params = (limit,)
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for r in rows:
+                    d = dict(r)
+                    d["payload"] = json.loads(d.pop("payload_json", "{}"))
+                    results.append(OfflineTask(**d))
+                return results
+
+    async def update_offline_task_status(
+        self, task_id: str, status: str, error_message: str = "", increment_retry: bool = False
+    ) -> bool:
+        """Update status of an offline task."""
+        now = _utcnow()
+        async with self._connect() as db:
+            if increment_retry:
+                cursor = await db.execute(
+                    """UPDATE offline_task_queue
+                    SET status = ?, error_message = ?, retry_count = retry_count + 1, updated_at = ?
+                    WHERE id = ?""",
+                    (status, error_message, now.isoformat(), task_id),
+                )
+            else:
+                cursor = await db.execute(
+                    """UPDATE offline_task_queue
+                    SET status = ?, error_message = ?, updated_at = ?
+                    WHERE id = ?""",
+                    (status, error_message, now.isoformat(), task_id),
+                )
+            await db.commit()
+            return cursor.rowcount > 0
 

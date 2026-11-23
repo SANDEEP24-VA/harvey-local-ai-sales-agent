@@ -426,7 +426,11 @@ function loadCurrentTab() {
     case 'usage': loadUsage(); break;
     case 'settings': loadSettings(); loadSendingModeCard(); break;
     case 'company': loadCompany(); break;
+    case 'products': loadProducts(); break;
     case 'controls': loadSellbirdStatus(); loadLogs(); break;
+    case 'reply-sim': loadReplySimulator(); break;
+    case 'hardware-view': loadHardwareProfileView(); break;
+    case 'tasks-view': loadTaskQueueView(); break;
   }
 }
 
@@ -447,6 +451,7 @@ async function loadToday() {
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
+  loadProductsCount();
   _todayStats = data.stats || {};
   renderFigures(_todayStats);
 
@@ -3248,9 +3253,23 @@ async function loadCompany() {
       <span class="hint">From training. Retrain with <code>sellbird train &lt;url&gt;</code></span></div>
     ${data.knowledge ? `<details class="company-learned"><summary>Product knowledge</summary><pre>${ce(data.knowledge)}</pre></details>` : ''}
     ${data.competitors ? `<details class="company-learned"><summary>Competitors</summary><pre>${ce(data.competitors)}</pre></details>` : ''}
-  </section>` : ''}`;
+  </section>` : ''}
+
+  <section class="card company-card" id="co-business-profile-card">
+    <div class="company-card-head">
+      <h3 id="co-bp-h">AI Business Profile & Market Positioning</h3>
+      <span class="hint">Synthesized by local Ollama &bull; Evidence-grounded</span>
+    </div>
+    <p class="desc">A structured profile mapping your company's core offering, target market, competitive advantages, and solved pain points to guide multi-product personalization.</p>
+    <div id="company-bp-content" style="margin-top:var(--sp-2)">
+      <button class="btn btn-secondary btn-sm" id="btn-gen-bp" onclick="generateCompanyProfileUI()">
+        <svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg> Generate Business Profile (Local AI)
+      </button>
+    </div>
+  </section>`;
   _offerIdeas = (o.entry_ideas || []).map(x => ({offer: x}));
   renderOfferIdeas();
+  loadCompanyProfileUI();
   const badge = document.getElementById('nav-company');
   if (badge) badge.textContent = o.proposed ? '1' : '';
 }
@@ -3365,3 +3384,1194 @@ async function dismissProposedOffer() {
   d.addEventListener('close', () => { if (_inboxPoll) { clearInterval(_inboxPoll); _inboxPoll = null; } });
   d.addEventListener('click', e => { if (e.target === d) closeInboxDialog(); });
 })();
+
+// ── Products & Multi-Product Management ──
+
+let _products = [];
+let _selectedProductId = null;
+let _currentProductSubtab = 'overview';
+let _productICPData = null;
+
+async function loadProductsCount() {
+  const prods = await api('/api/products');
+  if (Array.isArray(prods)) {
+    navCount('nav-products', prods.filter(p => p.is_active).length);
+  }
+}
+
+async function loadProducts() {
+  const showArchived = document.getElementById('show-archived-checkbox')?.checked || false;
+  const listEl = document.getElementById('products-list-container');
+  if (listEl) listEl.innerHTML = '<p class="desc">Loading products...</p>';
+
+  const prods = await api(`/api/products?include_archived=${showArchived}`);
+  if (!prods) {
+    if (listEl) listEl.innerHTML = '<p class="desc">Could not load products.</p>';
+    return;
+  }
+  _products = Array.isArray(prods) ? prods : [];
+  navCount('nav-products', _products.filter(p => p.is_active).length);
+  renderProductsList();
+
+  if (_selectedProductId && _products.find(p => p.id === _selectedProductId)) {
+    selectProduct(_selectedProductId);
+  } else if (_products.length > 0) {
+    selectProduct(_products[0].id);
+  } else {
+    _selectedProductId = null;
+    const detailEl = document.getElementById('product-detail-container');
+    const emptyEl = document.getElementById('product-empty-state');
+    if (detailEl) detailEl.style.display = 'none';
+    if (emptyEl) emptyEl.style.display = 'block';
+  }
+}
+
+function filterProductsList() {
+  renderProductsList();
+}
+
+function renderProductsList() {
+  const listEl = document.getElementById('products-list-container');
+  if (!listEl) return;
+  const query = (document.getElementById('product-search-input')?.value || '').toLowerCase();
+  const filtered = _products.filter(p =>
+    (p.name || '').toLowerCase().includes(query) ||
+    (p.sku || '').toLowerCase().includes(query) ||
+    (p.category || '').toLowerCase().includes(query) ||
+    (p.description || '').toLowerCase().includes(query)
+  );
+
+  if (!filtered.length) {
+    listEl.innerHTML = '<p class="desc" style="padding:var(--sp-2)">No products match.</p>';
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(p => {
+    const isSel = p.id === _selectedProductId;
+    const isArchived = !p.is_active;
+    return `
+      <div class="product-list-card ${isSel ? 'active' : ''} ${isArchived ? 'archived' : ''}" onclick="selectProduct('${escHtml(p.id)}')">
+        <div class="product-card-title">
+          <span>${escHtml(p.name)}</span>
+          ${isArchived ? '<span class="product-badge archived-badge">Archived</span>' : '<span class="product-badge active-badge">Active</span>'}
+        </div>
+        <div class="product-card-sub">${escHtml(p.category || 'General')} ${p.sku ? '&bull; ' + escHtml(p.sku) : ''}</div>
+        <div class="product-badges">
+          ${p.pricing_model ? `<span class="product-badge">${escHtml(p.pricing_model)}</span>` : ''}
+          ${(p.target_industries || []).slice(0, 2).map(ind => `<span class="product-badge">${escHtml(ind)}</span>`).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function selectProduct(productId) {
+  _selectedProductId = productId;
+  renderProductsList();
+
+  const product = _products.find(p => p.id === productId);
+  if (!product) return;
+
+  const detailEl = document.getElementById('product-detail-container');
+  const emptyEl = document.getElementById('product-empty-state');
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (detailEl) {
+    detailEl.style.display = 'flex';
+    renderProductDetail(product);
+  }
+}
+
+function renderProductDetail(p) {
+  const container = document.getElementById('product-detail-container');
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="card" style="padding:var(--sp-4)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:var(--sp-3)">
+        <div>
+          <div style="display:flex;align-items:center;gap:var(--sp-2)">
+            <h2 style="margin:0;font-size:var(--fs-h2)">${escHtml(p.name)}</h2>
+            ${p.is_active ? '<span class="product-badge active-badge">Active</span>' : '<span class="product-badge archived-badge">Archived</span>'}
+            ${p.sku ? `<span class="product-badge" style="font-family:var(--mono)">${escHtml(p.sku)}</span>` : ''}
+          </div>
+          <p class="desc" style="margin-top:4px">${escHtml(p.category || 'Product Offering')} &bull; Pricing: ${escHtml(p.pricing_model || 'Unspecified')} ${p.pricing_details ? '(' + escHtml(p.pricing_details) + ')' : ''}</p>
+        </div>
+        <div style="display:flex;gap:var(--sp-2)">
+          <button class="btn btn-secondary" onclick="openProductModal('${escHtml(p.id)}')"><svg class="icon" style="width:13px;height:13px"><use href="#i-pen"/></svg>Edit</button>
+          <button class="btn btn-secondary" onclick="matchProspectsAction('${escHtml(p.id)}')" id="btn-match-${escHtml(p.id)}"><svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg>Match Prospects</button>
+          ${p.is_active
+            ? `<button class="btn btn-secondary" style="color:var(--bad)" onclick="archiveProduct('${escHtml(p.id)}')">Archive</button>`
+            : `<button class="btn btn-secondary" onclick="unarchiveProduct('${escHtml(p.id)}')">Unarchive</button>`
+          }
+        </div>
+      </div>
+      ${p.value_proposition ? `<div class="notice info" style="margin-top:var(--sp-3);margin-bottom:0"><b>Value Proposition:</b> ${escHtml(p.value_proposition)}</div>` : ''}
+    </div>
+
+    <div class="card" style="padding:var(--sp-4)">
+      <div class="product-subtabs">
+        <button class="product-subtab-btn ${_currentProductSubtab === 'overview' ? 'active' : ''}" onclick="switchProductSubtab('overview')">Overview & Config</button>
+        <button class="product-subtab-btn ${_currentProductSubtab === 'icp' ? 'active' : ''}" onclick="switchProductSubtab('icp')">Local AI ICP</button>
+        <button class="product-subtab-btn ${_currentProductSubtab === 'intel' ? 'active' : ''}" onclick="switchProductSubtab('intel')">Sales Intelligence</button>
+        <button class="product-subtab-btn ${_currentProductSubtab === 'prospects' ? 'active' : ''}" onclick="switchProductSubtab('prospects')">Matched Prospects</button>
+        <button class="product-subtab-btn ${_currentProductSubtab === 'evidence' ? 'active' : ''}" onclick="switchProductSubtab('evidence')">Research Evidence</button>
+        <button class="product-subtab-btn ${_currentProductSubtab === 'campaigns' ? 'active' : ''}" onclick="switchProductSubtab('campaigns')">Campaigns</button>
+      </div>
+      <div id="product-subtab-content">
+        <!-- Rendered based on subtab -->
+      </div>
+    </div>
+  `;
+
+  loadProductSubtabContent(p);
+}
+
+function switchProductSubtab(subtab) {
+  _currentProductSubtab = subtab;
+  const p = _products.find(prod => prod.id === _selectedProductId);
+  if (p) renderProductDetail(p);
+}
+
+async function loadProductSubtabContent(p) {
+  const contentEl = document.getElementById('product-subtab-content');
+  if (!contentEl) return;
+
+  if (_currentProductSubtab === 'overview') {
+    contentEl.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4)">
+        <div>
+          <h4 style="font-size:var(--fs-ui);margin-bottom:var(--sp-2)">Description</h4>
+          <p class="desc" style="white-space:pre-wrap">${escHtml(p.description || 'No description provided.')}</p>
+
+          <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Key Features</h4>
+          <div class="tag-list">
+            ${(p.features || []).length ? p.features.map(f => `<span class="tag-item">${escHtml(f)}</span>`).join('') : '<span class="desc">No features listed.</span>'}
+          </div>
+
+          <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Core Benefits</h4>
+          <div class="tag-list">
+            ${(p.benefits || []).length ? p.benefits.map(b => `<span class="tag-item">${escHtml(b)}</span>`).join('') : '<span class="desc">No benefits listed.</span>'}
+          </div>
+        </div>
+
+        <div>
+          <h4 style="font-size:var(--fs-ui);margin-bottom:var(--sp-2)">Target Industries & Customer Sizes</h4>
+          <div class="tag-list">
+            ${(p.target_industries || []).map(ind => `<span class="tag-item">${escHtml(ind)}</span>`).join('')}
+            ${(p.target_customer_sizes || []).map(sz => `<span class="tag-item">${escHtml(sz)}</span>`).join('')}
+          </div>
+
+          <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Target Personas & Titles</h4>
+          <div class="tag-list">
+            ${(p.target_job_titles || []).length ? p.target_job_titles.map(t => `<span class="tag-item">${escHtml(t)}</span>`).join('') : '<span class="desc">No titles listed.</span>'}
+          </div>
+
+          <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Pain Points Addressed</h4>
+          <div class="tag-list">
+            ${(p.pain_points || []).length ? p.pain_points.map(pn => `<span class="tag-item">${escHtml(pn)}</span>`).join('') : '<span class="desc">No pain points listed.</span>'}
+          </div>
+
+          ${p.entry_offer ? `
+            <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Entry Offer / Hook</h4>
+            <div class="notice good" style="margin-bottom:0">${escHtml(p.entry_offer)}</div>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  } else if (_currentProductSubtab === 'icp') {
+    contentEl.innerHTML = '<p class="desc">Loading product ICP...</p>';
+    const icp = await api(`/api/products/${p.id}/icp`);
+    _productICPData = icp;
+    renderProductICPView(p, icp);
+  } else if (_currentProductSubtab === 'intel') {
+    contentEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-3)">
+        <p class="desc" style="margin:0">Generate positioning, value propositions, and objection responses using local Ollama.</p>
+        <button class="btn btn-primary" onclick="generateProductIntelligenceAction('${escHtml(p.id)}')" id="btn-gen-intel"><svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg>Generate with Local Ollama</button>
+      </div>
+      <div id="intel-content-box">
+        <p class="desc">Click "Generate with Local Ollama" to synthesize product intelligence.</p>
+      </div>
+    `;
+  } else if (_currentProductSubtab === 'prospects') {
+    contentEl.innerHTML = '<p class="desc">Loading matched prospects...</p>';
+    const matched = await api(`/api/products/${p.id}/prospects`);
+    renderMatchedProspectsView(p, matched || []);
+  } else if (_currentProductSubtab === 'evidence') {
+    contentEl.innerHTML = '<p class="desc">Loading research evidence...</p>';
+    const evidence = await api(`/api/products/${p.id}/evidence`);
+    renderEvidenceView(p, evidence || []);
+  } else if (_currentProductSubtab === 'campaigns') {
+    contentEl.innerHTML = '<p class="desc">Loading product campaigns...</p>';
+    const campaigns = await api(`/api/products/${p.id}/campaigns`);
+    renderProductCampaignsView(p, campaigns || []);
+  }
+}
+
+function renderProductICPView(p, icp) {
+  const contentEl = document.getElementById('product-subtab-content');
+  if (!contentEl) return;
+
+  if (!icp) {
+    contentEl.innerHTML = `
+      <div style="text-align:center;padding:var(--sp-5) 0">
+        <p class="desc">No Ideal Customer Profile has been generated for this product yet.</p>
+        <button class="btn btn-primary" onclick="generateProductICPAction('${escHtml(p.id)}')" id="btn-gen-icp" style="margin-top:var(--sp-2)">
+          <svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg>Generate ICP with Local Ollama
+        </button>
+      </div>
+    `;
+    return;
+  }
+
+  contentEl.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-4)">
+      <div class="desc">Ideal Customer Profile &bull; Last updated: ${new Date(icp.updated_at || Date.now()).toLocaleDateString()}</div>
+      <button class="btn btn-secondary" onclick="generateProductICPAction('${escHtml(p.id)}')" id="btn-gen-icp">
+        <svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg>Regenerate with Local Ollama
+      </button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4)">
+      <div>
+        <h4 style="font-size:var(--fs-ui);margin-bottom:var(--sp-2)">Target Industries</h4>
+        <div class="tag-list">${(icp.target_industries || []).map(i => `<span class="tag-item">${escHtml(i)}</span>`).join('')}</div>
+
+        <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Decision-Maker Titles</h4>
+        <div class="tag-list">${(icp.job_titles || []).map(t => `<span class="tag-item">${escHtml(t)}</span>`).join('')}</div>
+
+        <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Company Size & Revenue</h4>
+        <p class="desc"><b>Size:</b> ${escHtml(icp.company_size || 'Flexible')} &bull; <b>Revenue:</b> ${escHtml(icp.revenue_range || 'Flexible')}</p>
+
+        <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Target Technologies</h4>
+        <div class="tag-list">${(icp.technologies || []).map(t => `<span class="tag-item">${escHtml(t)}</span>`).join('')}</div>
+      </div>
+
+      <div>
+        <h4 style="font-size:var(--fs-ui);margin-bottom:var(--sp-2)">Core Pain Points</h4>
+        <div class="tag-list">${(icp.pain_points || []).map(pn => `<span class="tag-item">${escHtml(pn)}</span>`).join('')}</div>
+
+        <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Buying Signals</h4>
+        <div class="tag-list">${(icp.buying_signals || []).map(s => `<span class="tag-item" style="border-color:var(--good-line);background:var(--good-bg);color:var(--good)">${escHtml(s)}</span>`).join('')}</div>
+
+        <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Exclusion Criteria</h4>
+        <div class="tag-list">${(icp.exclusion_criteria || []).map(e => `<span class="tag-item" style="border-color:var(--bad-line);background:var(--bad-bg);color:var(--bad)">${escHtml(e)}</span>`).join('')}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderMatchedProspectsView(p, matches) {
+  const contentEl = document.getElementById('product-subtab-content');
+  if (!contentEl) return;
+
+  if (!matches.length) {
+    contentEl.innerHTML = `
+      <div style="text-align:center;padding:var(--sp-5) 0">
+        <p class="desc">No prospects have been matched against this product yet.</p>
+        <button class="btn btn-primary" onclick="matchProspectsAction('${escHtml(p.id)}')" id="btn-match-inner" style="margin-top:var(--sp-2)">
+          <svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg>Match Available Prospects Now
+        </button>
+      </div>
+    `;
+    return;
+  }
+
+  contentEl.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-3)">
+      <div class="desc">${matches.length} prospect(s) evaluated against ${escHtml(p.name)}</div>
+      <button class="btn btn-secondary" onclick="matchProspectsAction('${escHtml(p.id)}')" id="btn-match-inner">
+        <svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg>Re-run Matching
+      </button>
+    </div>
+
+    <table class="table" style="width:100%;border-collapse:collapse">
+      <thead>
+        <tr style="border-bottom:1px solid var(--line);text-align:left;font-size:var(--fs-caption);color:var(--text-3)">
+          <th style="padding:8px">Prospect</th>
+          <th style="padding:8px">Title & Company</th>
+          <th style="padding:8px">ICP Fit</th>
+          <th style="padding:8px">Opportunity Score (v1.0)</th>
+          <th style="padding:8px">Status</th>
+          <th style="padding:8px">Matching Rationale</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${matches.map(item => {
+          const m = item.match || {};
+          const pr = item.prospect || {};
+          const score = m.fit_score || 0;
+          let pillClass = 'low';
+          if (score >= 75) pillClass = 'high';
+          else if (score >= 50) pillClass = 'medium';
+          else if (score < 25) pillClass = 'disqualified';
+
+          // Opportunity score calculation/display
+          const oppScore = m.opportunity_score !== undefined ? m.opportunity_score : score;
+          const isProvisional = m.is_provisional !== undefined ? m.is_provisional : true;
+          let oppPill = 'low';
+          if (oppScore >= 75) oppPill = 'high';
+          else if (oppScore >= 50) oppPill = 'medium';
+
+          const reasons = (m.matching_reasons || []).slice(0, 2).join('; ');
+          return `
+            <tr style="border-bottom:1px solid var(--line)">
+              <td style="padding:8px">
+                <b>${escHtml(pr.first_name || '')} ${escHtml(pr.last_name || '')}</b>
+                <div style="font-size:var(--fs-caption);color:var(--text-3)">${escHtml(pr.email || '')}</div>
+              </td>
+              <td style="padding:8px">
+                <div>${escHtml(pr.title || 'Unknown Title')}</div>
+                <div style="font-size:var(--fs-caption);color:var(--text-2)">${escHtml(pr.company || '')}</div>
+              </td>
+              <td style="padding:8px">
+                <span class="fit-score-pill ${pillClass}">${Math.round(score)}%</span>
+              </td>
+              <td style="padding:8px">
+                <div style="display:flex;align-items:center;gap:4px">
+                  <span class="fit-score-pill ${oppPill}">${Math.round(oppScore)} / 100</span>
+                  ${isProvisional
+                    ? '<span class="tag wait" style="font-size:10px" title="Provisional score: no verified website signals observed yet">Provisional</span>'
+                    : '<span class="tag good" style="font-size:10px" title="Formula v1.0: 70% ICP fit + 30% verified buying signals">Verified</span>'}
+                </div>
+              </td>
+              <td style="padding:8px">
+                <span class="tag-item">${escHtml(m.matching_status || 'matched')}</span>
+              </td>
+              <td style="padding:8px;font-size:var(--fs-caption);color:var(--text-2);max-width:300px">
+                ${escHtml(reasons || 'Direct ICP fit')}
+              </td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderEvidenceView(p, evidence) {
+  const contentEl = document.getElementById('product-subtab-content');
+  if (!contentEl) return;
+
+  if (!evidence.length) {
+    contentEl.innerHTML = '<p class="desc">No traceable research evidence recorded yet for this product. Run prospect matching to generate verified evidence.</p>';
+    return;
+  }
+
+  contentEl.innerHTML = `
+    <div class="desc" style="margin-bottom:var(--sp-3)">${evidence.length} evidence items logged for this product.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)">
+      ${evidence.map(ev => `
+        <div class="evidence-card">
+          <div style="display:flex;justify-content:space-between">
+            <span class="evidence-source">${escHtml(ev.evidence_source || 'Research Source')}</span>
+            ${ev.buying_signal ? `<span class="product-badge">${escHtml(ev.buying_signal)}</span>` : ''}
+          </div>
+          <div class="evidence-desc">${escHtml(ev.evidence_description)}</div>
+          ${ev.evidence_url ? `<div class="evidence-meta"><a href="${escHtml(ev.evidence_url)}" target="_blank" rel="noopener">${escHtml(ev.evidence_url)}</a></div>` : ''}
+          <div class="evidence-meta">Recorded: ${new Date(ev.retrieval_timestamp || Date.now()).toLocaleDateString()}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderProductCampaignsView(p, campaigns) {
+  const contentEl = document.getElementById('product-subtab-content');
+  if (!contentEl) return;
+
+  if (!campaigns.length) {
+    contentEl.innerHTML = '<p class="desc">No campaigns are currently associated with this product. When the Writer crafts outreach for matched prospects, campaigns will link automatically.</p>';
+    return;
+  }
+
+  contentEl.innerHTML = `
+    <div class="desc" style="margin-bottom:var(--sp-3)">${campaigns.length} campaign(s) linked to ${escHtml(p.name)}:</div>
+    <table class="table" style="width:100%;border-collapse:collapse">
+      <thead>
+        <tr style="border-bottom:1px solid var(--line);text-align:left;font-size:var(--fs-caption);color:var(--text-3)">
+          <th style="padding:8px">Campaign Name</th>
+          <th style="padding:8px">Channel</th>
+          <th style="padding:8px">Status</th>
+          <th style="padding:8px">Sequence Steps</th>
+          <th style="padding:8px">Prospects Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${campaigns.map(c => `
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:8px"><b>${escHtml(c.name || 'Unnamed')}</b></td>
+            <td style="padding:8px"><span class="tag-item">${escHtml(c.channel || 'email')}</span></td>
+            <td style="padding:8px"><span class="tag-item">${escHtml(c.status || 'draft')}</span></td>
+            <td style="padding:8px">${(c.sequence || []).length} steps</td>
+            <td style="padding:8px">${(c.prospect_ids || []).length} prospects</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+async function generateProductICPAction(productId) {
+  const btn = document.getElementById('btn-gen-icp');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating with Ollama...'; }
+  const icp = await api(`/api/products/${productId}/generate-icp`, {method: 'POST'});
+  if (btn) { btn.disabled = false; btn.textContent = 'Generate ICP with Local Ollama'; }
+  if (icp && !icp.error) {
+    showToast('Product ICP successfully generated using local Ollama!', 'success');
+    _productICPData = icp;
+    const p = _products.find(prod => prod.id === productId);
+    if (p) renderProductICPView(p, icp);
+  } else {
+    showToast((icp && icp.error) || 'Failed to generate ICP via Ollama.', 'error');
+  }
+}
+
+async function generateProductIntelligenceAction(productId) {
+  const btn = document.getElementById('btn-gen-intel');
+  const box = document.getElementById('intel-content-box');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating Intelligence...'; }
+  if (box) box.innerHTML = '<p class="desc">Generating problem statements, value props, differentiators and objection strategies with Ollama...</p>';
+
+  const intel = await api(`/api/products/${productId}/generate-intelligence`, {method: 'POST'});
+  if (btn) { btn.disabled = false; btn.textContent = 'Generate with Local Ollama'; }
+
+  if (intel && !intel.error) {
+    showToast('Sales intelligence generated successfully!', 'success');
+    box.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);margin-top:var(--sp-3)">
+        <div>
+          <h4 style="font-size:var(--fs-ui);margin-bottom:var(--sp-2)">Problem Statements</h4>
+          <ul style="padding-left:18px;margin:0">
+            ${(intel.problem_statements || []).map(ps => `<li class="desc" style="margin-bottom:4px">${escHtml(ps)}</li>`).join('')}
+          </ul>
+
+          <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Core Value Propositions</h4>
+          <ul style="padding-left:18px;margin:0">
+            ${(intel.value_propositions || []).map(vp => `<li class="desc" style="margin-bottom:4px">${escHtml(vp)}</li>`).join('')}
+          </ul>
+
+          <h4 style="font-size:var(--fs-ui);margin-top:var(--sp-3);margin-bottom:var(--sp-2)">Key Differentiators</h4>
+          <ul style="padding-left:18px;margin:0">
+            ${(intel.differentiators || []).map(df => `<li class="desc" style="margin-bottom:4px">${escHtml(df)}</li>`).join('')}
+          </ul>
+        </div>
+
+        <div>
+          <h4 style="font-size:var(--fs-ui);margin-bottom:var(--sp-2)">Objection Responses</h4>
+          ${Object.entries(intel.objection_responses || {}).map(([obj, resp]) => `
+            <div class="evidence-card">
+              <b style="color:var(--wait)">"${escHtml(obj)}"</b>
+              <div class="desc" style="margin-top:4px">${escHtml(resp)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  } else {
+    showToast((intel && intel.error) || 'Failed to generate intelligence.', 'error');
+    if (box) box.innerHTML = '<p class="desc">Generation failed. Please ensure Ollama is running.</p>';
+  }
+}
+
+async function matchProspectsAction(productId) {
+  const btn = document.getElementById(`btn-match-${productId}`) || document.getElementById('btn-match-inner');
+  if (btn) { btn.disabled = true; btn.textContent = 'Matching...'; }
+
+  const res = await api(`/api/products/${productId}/match-prospects`, {method: 'POST'});
+  if (btn) { btn.disabled = false; btn.textContent = 'Match Prospects'; }
+
+  if (res && !res.error) {
+    showToast(`Successfully matched ${res.matched || 0} prospects against product!`, 'success');
+    switchProductSubtab('prospects');
+  } else {
+    showToast((res && res.error) || 'Matching failed.', 'error');
+  }
+}
+
+function openProductModal(productId = null) {
+  const modal = document.getElementById('product-modal-dialog');
+  if (!modal) return;
+  const titleEl = document.getElementById('product-modal-title');
+  const idEl = document.getElementById('pm-id');
+  const nameEl = document.getElementById('pm-name');
+  const skuEl = document.getElementById('pm-sku');
+  const catEl = document.getElementById('pm-category');
+  const priceEl = document.getElementById('pm-pricing');
+  const descEl = document.getElementById('pm-description');
+  const vpEl = document.getElementById('pm-value-prop');
+  const featEl = document.getElementById('pm-features');
+  const benEl = document.getElementById('pm-benefits');
+  const indEl = document.getElementById('pm-industries');
+  const titEl = document.getElementById('pm-titles');
+  const painEl = document.getElementById('pm-pains');
+  const offEl = document.getElementById('pm-offer');
+
+  if (productId) {
+    const p = _products.find(prod => prod.id === productId);
+    if (!p) return;
+    titleEl.textContent = 'Edit Product';
+    idEl.value = p.id;
+    nameEl.value = p.name || '';
+    skuEl.value = p.sku || '';
+    catEl.value = p.category || '';
+    priceEl.value = p.pricing_model ? `${p.pricing_model} ${p.pricing_details || ''}`.trim() : '';
+    descEl.value = p.description || '';
+    vpEl.value = p.value_proposition || '';
+    featEl.value = (p.features || []).join(', ');
+    benEl.value = (p.benefits || []).join(', ');
+    indEl.value = (p.target_industries || []).join(', ');
+    titEl.value = (p.target_job_titles || []).join(', ');
+    painEl.value = (p.pain_points || []).join(', ');
+    offEl.value = p.entry_offer || '';
+  } else {
+    titleEl.textContent = 'Add Product';
+    idEl.value = '';
+    nameEl.value = '';
+    skuEl.value = '';
+    catEl.value = '';
+    priceEl.value = '';
+    descEl.value = '';
+    vpEl.value = '';
+    featEl.value = '';
+    benEl.value = '';
+    indEl.value = '';
+    titEl.value = '';
+    painEl.value = '';
+    offEl.value = '';
+  }
+
+  modal.style.display = 'flex';
+}
+
+function closeProductModal() {
+  const modal = document.getElementById('product-modal-dialog');
+  if (modal) modal.style.display = 'none';
+}
+
+async function handleProductFormSubmit(e) {
+  e.preventDefault();
+  const id = document.getElementById('pm-id').value;
+  const name = document.getElementById('pm-name').value.trim();
+  const sku = document.getElementById('pm-sku').value.trim();
+  const category = document.getElementById('pm-category').value.trim();
+  const pricingRaw = document.getElementById('pm-pricing').value.trim();
+  const description = document.getElementById('pm-description').value.trim();
+  const value_proposition = document.getElementById('pm-value-prop').value.trim();
+  const features = document.getElementById('pm-features').value.split(',').map(s => s.trim()).filter(Boolean);
+  const benefits = document.getElementById('pm-benefits').value.split(',').map(s => s.trim()).filter(Boolean);
+  const target_industries = document.getElementById('pm-industries').value.split(',').map(s => s.trim()).filter(Boolean);
+  const target_job_titles = document.getElementById('pm-titles').value.split(',').map(s => s.trim()).filter(Boolean);
+  const pain_points = document.getElementById('pm-pains').value.split(',').map(s => s.trim()).filter(Boolean);
+  const entry_offer = document.getElementById('pm-offer').value.trim();
+
+  const payload = {
+    name,
+    sku,
+    category,
+    pricing_model: pricingRaw,
+    description,
+    value_proposition,
+    features,
+    benefits,
+    target_industries,
+    target_job_titles,
+    pain_points,
+    entry_offer,
+  };
+
+  let res = null;
+  if (id) {
+    res = await api(`/api/products/${id}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+  } else {
+    res = await api('/api/products', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+  }
+
+  if (res && !res.error) {
+    showToast(id ? 'Product updated successfully.' : 'Product created successfully.', 'success');
+    closeProductModal();
+    const newId = res.id || id;
+    await loadProducts();
+    if (newId) selectProduct(newId);
+  } else {
+    showToast((res && res.error) || 'Failed to save product.', 'error');
+  }
+}
+
+async function archiveProduct(productId) {
+  if (!confirm('Are you sure you want to archive this product? It will be hidden from active prospecting.')) return;
+  const res = await api(`/api/products/${productId}`, {method: 'DELETE'});
+  if (res && res.ok) {
+    showToast('Product archived.', 'success');
+    await loadProducts();
+  } else {
+    showToast((res && res.error) || 'Failed to archive product.', 'error');
+  }
+}
+
+async function unarchiveProduct(productId) {
+  const res = await api(`/api/products/${productId}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({is_active: true}),
+  });
+  if (res && !res.error) {
+    showToast('Product unarchived.', 'success');
+    await loadProducts();
+    selectProduct(productId);
+  } else {
+    showToast('Failed to unarchive product.', 'error');
+  }
+}
+
+// ── Milestone Extensions: Reply Simulator, Hardware Profiler & Task Queue ──
+
+let _sampleLibrary = [];
+
+async function loadReplySimulator() {
+  const select = document.getElementById('sim-scenario-select');
+  if (!select) return;
+  if (_sampleLibrary.length === 0) {
+    const data = await api('/api/conversations/sample-library');
+    if (data && data.samples) {
+      _sampleLibrary = data.samples;
+      select.innerHTML = '<option value="">-- Choose a scenario to load --</option>' +
+        _sampleLibrary.map((s, idx) => `<option value="${idx}">[${escHtml(s.intent)}] ${escHtml(s.name)}</option>`).join('');
+    }
+  }
+}
+
+function onSelectSimScenario(idx) {
+  if (idx === '' || !_sampleLibrary[idx]) return;
+  const s = _sampleLibrary[idx];
+  document.getElementById('sim-incoming-text').value = s.incoming_text || '';
+  document.getElementById('sim-prospect-name').value = s.prospect_name || '';
+  document.getElementById('sim-product-name').value = s.product_name || '';
+  const resultCard = document.getElementById('sim-result-card');
+  if (resultCard) resultCard.style.display = 'none';
+}
+
+async function runSimulateReply() {
+  const incoming = (document.getElementById('sim-incoming-text').value || '').trim();
+  if (!incoming) {
+    showToast('Please enter prospect reply text to simulate.', 'error');
+    return;
+  }
+  const btn = document.getElementById('sim-run-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<svg class="icon" style="width:13px;height:13px;animation:spin 1s linear infinite"><use href="#i-refresh"/></svg> Classifying with Local Ollama...';
+  }
+
+  try {
+    const payload = {
+      incoming_text: incoming,
+      prospect_name: (document.getElementById('sim-prospect-name').value || '').trim(),
+      product_name: (document.getElementById('sim-product-name').value || '').trim(),
+    };
+    const res = await api('/api/conversations/test-classify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+
+    if (!res || res.error) {
+      showToast((res && res.error) || 'Simulation failed.', 'error');
+      return;
+    }
+
+    const card = document.getElementById('sim-result-card');
+    if (card) card.style.display = 'block';
+
+    const badge = document.getElementById('sim-intent-badge');
+    const intent = res.intent || 'unknown';
+    let tone = 'idle';
+    if (intent === 'meeting' || intent === 'interested') tone = 'good';
+    else if (intent === 'opted_out' || intent === 'not_interested') tone = 'bad';
+    else if (intent === 'question') tone = 'note';
+    else if (intent === 'out_of_office') tone = 'wait';
+
+    badge.className = 'tag ' + tone;
+    badge.textContent = intent.toUpperCase();
+
+    document.getElementById('sim-stage-val').textContent = res.new_stage || 'replied';
+    document.getElementById('sim-confidence-val').textContent = Math.round((res.confidence || 0.85) * 100) + '%';
+
+    const optoutVal = document.getElementById('sim-optout-val');
+    if (res.opt_out_detected || intent === 'opted_out') {
+      optoutVal.innerHTML = '<span class="tag bad">OPT-OUT DETECTED</span>';
+    } else {
+      optoutVal.innerHTML = '<span class="tag good">Safe</span>';
+    }
+
+    document.getElementById('sim-reasoning-val').textContent = res.reasoning || res.action_taken || 'Classified via local Ollama inference.';
+    document.getElementById('sim-reply-val').textContent = res.draft_reply || '(No reply generated — opt-out or terminal state recorded)';
+
+    showToast('Classification complete.', 'success');
+  } catch (err) {
+    showToast('Failed to classify reply: ' + err.message, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg> Classify & Preview Action';
+    }
+  }
+}
+
+async function loadHardwareProfileView(forceRefresh) {
+  const container = document.getElementById('hw-profile-container');
+  if (!container) return;
+  if (forceRefresh) {
+    container.innerHTML = '<p class="desc">Scanning local device hardware & VRAM...</p>';
+  }
+
+  const hw = await api('/api/system/hardware-profile');
+  if (!hw) {
+    container.innerHTML = '<p class="desc">Could not reach hardware profiler endpoint.</p>';
+    return;
+  }
+
+  // Update nav pill
+  const navTier = document.getElementById('nav-hw-tier');
+  if (navTier && hw.hardware_tier) {
+    navTier.textContent = hw.hardware_tier;
+  }
+
+  let tierColor = 'var(--accent)';
+  if (hw.hardware_tier === 'Laptop') tierColor = 'var(--active)';
+  else if (hw.hardware_tier === 'Workstation') tierColor = 'var(--good)';
+  else if (hw.hardware_tier === 'High Performance') tierColor = 'var(--note)';
+
+  container.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:var(--sp-3);margin-bottom:var(--sp-4)">
+      <div class="card" style="margin:0">
+        <div class="form-label">Inference Provider</div>
+        <div style="font-size:var(--fs-h3);font-weight:600;margin-top:4px;color:var(--text)">Ollama (Local Engine)</div>
+        <div class="desc" style="margin-top:2px;font-family:var(--mono);font-size:var(--fs-caption)">${escHtml(hw.active_model || 'qwen3:4b-instruct-2507-q4_K_M')}</div>
+        <span class="tag good" style="margin-top:var(--sp-2);display:inline-block">Zero Cloud LLM &middot; 100% Free</span>
+      </div>
+
+      <div class="card" style="margin:0">
+        <div class="form-label">Hardware Tier</div>
+        <div style="font-size:var(--fs-h3);font-weight:600;margin-top:4px;color:${tierColor}">${escHtml(hw.hardware_tier || 'Workstation')}</div>
+        <div class="desc" style="margin-top:2px">Recommended: <code>${escHtml(hw.recommended_model || 'qwen3:4b-instruct-2507-q4_K_M')}</code></div>
+        <div class="desc" style="margin-top:4px;font-size:var(--fs-caption)">Auto-scaled for available VRAM & RAM</div>
+      </div>
+
+      <div class="card" style="margin:0">
+        <div class="form-label">Host CPU & Memory</div>
+        <div style="font-size:var(--fs-h3);font-weight:600;margin-top:4px;color:var(--text)">${hw.cpu.cores} Cores &middot; ${hw.ram.total_gb} GB RAM</div>
+        <div class="desc" style="margin-top:2px">${hw.ram.available_gb} GB free system RAM</div>
+        <div class="desc" style="margin-top:4px;font-size:var(--fs-caption)">CPU: ${escHtml(hw.cpu.brand || 'x86_64')}</div>
+      </div>
+
+      <div class="card" style="margin:0">
+        <div class="form-label">GPU Acceleration</div>
+        <div style="font-size:var(--fs-h3);font-weight:600;margin-top:4px;color:var(--text)">${hw.gpu.detected ? escHtml(hw.gpu.device_name) : 'CPU-only Mode'}</div>
+        <div class="desc" style="margin-top:2px">${hw.gpu.detected ? hw.gpu.vram_free_gb + ' GB free / ' + hw.gpu.vram_total_gb + ' GB total VRAM' : 'No NVIDIA GPU detected'}</div>
+        <span class="tag ${hw.gpu.detected ? 'accent' : 'idle'}" style="margin-top:var(--sp-2);display:inline-block">
+          ${hw.gpu.detected ? 'NVIDIA CUDA Enabled' : 'CPU Inference'}
+        </span>
+      </div>
+    </div>
+
+    ${hw.memory_warning && hw.warnings && hw.warnings.length ? `
+      <div class="card" style="background:var(--bad-bg);border:1px solid var(--bad-line);margin-bottom:var(--sp-4)">
+        <h4 style="margin:0 0 6px 0;color:var(--bad)">Memory Capacity Warning</h4>
+        ${hw.warnings.map(w => `<p style="margin:0;color:var(--bad);font-size:var(--fs-body)">${escHtml(w)}</p>`).join('')}
+      </div>
+    ` : ''}
+
+    <div class="card" style="margin-bottom:var(--sp-4)">
+      <h3 style="margin-top:0;font-size:var(--fs-h3)">Device Tier & Model Scaling Hierarchy</h3>
+      <p class="desc">Harvey automatically adapts inference parameter size and context windows to ensure stable, low-latency execution without out-of-memory crashes.</p>
+      <div class="table-card" style="margin-top:var(--sp-3)">
+        <table class="file-table" style="width:100%">
+          <thead>
+            <tr style="text-align:left;border-bottom:1px solid var(--line)">
+              <th style="padding:8px">Hardware Tier</th>
+              <th style="padding:8px">Hardware Profile</th>
+              <th style="padding:8px">Parameter Class</th>
+              <th style="padding:8px">Default Recommended Ollama Models</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="${hw.hardware_tier === 'Laptop' ? 'background:var(--surface-2);font-weight:600' : ''}">
+              <td style="padding:8px"><span class="tag active">Laptop</span></td>
+              <td style="padding:8px">&le; 8GB RAM, CPU / Integrated GPU</td>
+              <td style="padding:8px">1.5B &ndash; 3B parameters</td>
+              <td style="padding:8px"><code>qwen2.5:1.5b-instruct</code>, <code>llama3.2:3b</code></td>
+            </tr>
+            <tr style="${hw.hardware_tier === 'Workstation' ? 'background:var(--surface-2);font-weight:600' : ''}">
+              <td style="padding:8px"><span class="tag good">Workstation</span></td>
+              <td style="padding:8px">8 &ndash; 24GB RAM, 4 &ndash; 8GB VRAM</td>
+              <td style="padding:8px">4B &ndash; 8B parameters</td>
+              <td style="padding:8px"><code>qwen3:4b-instruct-2507-q4_K_M</code>, <code>llama3.1:8b</code></td>
+            </tr>
+            <tr style="${hw.hardware_tier === 'High Performance' ? 'background:var(--surface-2);font-weight:600' : ''}">
+              <td style="padding:8px"><span class="tag note">High Performance</span></td>
+              <td style="padding:8px">&gt; 24GB RAM, &gt; 12GB VRAM</td>
+              <td style="padding:8px">14B &ndash; 32B parameters</td>
+              <td style="padding:8px"><code>qwen2.5:14b-instruct</code>, <code>qwen2.5:32b-instruct</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function loadTaskQueueView() {
+  const container = document.getElementById('task-queue-list-container');
+  if (!container) return;
+  const res = await api('/api/tasks/queue');
+  if (!res || !res.tasks) {
+    container.innerHTML = '<p class="desc">No tasks found or failed to load queue.</p>';
+    return;
+  }
+
+  const tasks = res.tasks;
+  const navTasks = document.getElementById('nav-tasks');
+  const pendingCount = tasks.filter(t => t.status === 'pending' || t.status === 'processing').length;
+  if (navTasks) navTasks.textContent = pendingCount ? pendingCount : '';
+
+  if (tasks.length === 0) {
+    container.innerHTML = '<p class="desc">Queue is empty. Use the form above to enqueue asynchronous web research tasks.</p>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="table-card">
+      <table class="file-table" style="width:100%">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--line)">
+            <th style="padding:8px">ID</th>
+            <th style="padding:8px">Task Type</th>
+            <th style="padding:8px">Status</th>
+            <th style="padding:8px">Retries</th>
+            <th style="padding:8px">Payload Summary</th>
+            <th style="padding:8px">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tasks.map(t => {
+            let tone = 'idle';
+            if (t.status === 'completed') tone = 'good';
+            else if (t.status === 'failed') tone = 'bad';
+            else if (t.status === 'pending') tone = 'wait';
+            else if (t.status === 'processing') tone = 'active';
+
+            const payloadStr = JSON.stringify(t.payload || {});
+            const shortPayload = payloadStr.length > 50 ? payloadStr.slice(0, 50) + '...' : payloadStr;
+
+            return `
+              <tr>
+                <td style="padding:8px;font-family:var(--mono);font-size:var(--fs-caption)">${escHtml((t.id || '').slice(0, 8))}</td>
+                <td style="padding:8px"><strong>${escHtml(t.task_type)}</strong></td>
+                <td style="padding:8px"><span class="tag ${tone}">${escHtml(t.status)}</span></td>
+                <td style="padding:8px">${t.retry_count} / ${t.max_retries || 3}</td>
+                <td style="padding:8px;font-family:var(--mono);font-size:var(--fs-caption);max-width:240px;overflow:hidden;text-overflow:ellipsis">${escHtml(shortPayload)}</td>
+                <td style="padding:8px">
+                  ${t.status === 'failed' || t.status === 'pending' ? `
+                    <button class="btn btn-secondary btn-sm" onclick="retryOfflineTask('${escHtml(t.id)}')">Retry</button>
+                  ` : '<span style="color:var(--text-3)">&mdash;</span>'}
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function retryOfflineTask(id) {
+  const res = await api(`/api/tasks/queue/${id}/retry`, {method: 'POST'});
+  if (res && res.ok) {
+    showToast('Task queued for immediate retry.', 'success');
+    await loadTaskQueueView();
+  } else {
+    showToast((res && res.error) || 'Failed to retry task.', 'error');
+  }
+}
+
+async function submitQueueScrapeTask() {
+  const input = document.getElementById('queue-url-input');
+  const resDiv = document.getElementById('queue-scrape-result');
+  const url = (input.value || '').trim();
+  if (!url || !/^https?:\/\//i.test(url)) {
+    showToast('Please enter a valid http:// or https:// URL.', 'error');
+    return;
+  }
+
+  resDiv.innerHTML = '<p class="desc">Scraping and analyzing URL with SSRF protection & SQLite cache...</p>';
+  try {
+    const data = await api('/api/research/scrape', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: url, offline_only: false})
+    });
+
+    if (!data || data.error) {
+      resDiv.innerHTML = `<div class="tag bad">${escHtml(data ? data.error : 'Failed to scrape')}</div>`;
+      return;
+    }
+
+    resDiv.innerHTML = `
+      <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm);margin-top:var(--sp-2)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong style="color:var(--text)">${escHtml(data.title || data.domain)}</strong>
+          <span class="tag ${data.is_cached ? 'accent' : 'good'}">${data.is_cached ? 'From Local Cache' : 'Live Crawled'}</span>
+        </div>
+        <div class="desc" style="margin-top:4px">${escHtml(data.meta_description || 'No meta description')}</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:var(--sp-2)">
+          ${(data.technologies || []).map(t => `<span class="tag idle">${escHtml(t)}</span>`).join('')}
+          ${(data.hiring_roles || []).map(h => `<span class="tag wait">${escHtml(h)}</span>`).join('')}
+        </div>
+      </div>
+    `;
+    input.value = '';
+    showToast('URL researched and cached successfully.', 'success');
+    await loadTaskQueueView();
+  } catch (err) {
+    resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+// Background hardware profiler initialization
+(async function initHardwareProfileBadge() {
+  try {
+    const hw = await api('/api/system/hardware-profile');
+    if (hw && hw.hardware_tier) {
+      const navTier = document.getElementById('nav-hw-tier');
+      if (navTier) navTier.textContent = hw.hardware_tier;
+    }
+  } catch { /* ignore offline */ }
+})();
+
+async function loadCompanyProfileUI() {
+  const container = document.getElementById('company-bp-content');
+  if (!container) return;
+  const bp = await api('/api/companies/default/business-profile');
+  if (bp && bp.business_profile && bp.business_profile.core_offering) {
+    const p = bp.business_profile;
+    container.innerHTML = `
+      <div style="background:var(--surface-2);border-radius:var(--r-sm);padding:var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-2)">
+        <div><strong>Target Market:</strong> <span class="desc">${escHtml(p.target_market)}</span></div>
+        <div><strong>Core Offering:</strong> <span class="desc">${escHtml(p.core_offering)}</span></div>
+        <div><strong>Key Differentiators:</strong>
+          <ul style="margin:4px 0 0 16px;padding:0">
+            ${(p.differentiators || []).map(d => `<li class="desc">${escHtml(d)}</li>`).join('')}
+          </ul>
+        </div>
+        <div><strong>Pain Points Solved:</strong>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+            ${(p.pain_points_solved || []).map(pp => `<span class="tag wait">${escHtml(pp)}</span>`).join('')}
+          </div>
+        </div>
+        <div style="margin-top:var(--sp-2)">
+          <button class="btn btn-secondary btn-sm" onclick="generateCompanyProfileUI()">
+            <svg class="icon" style="width:13px;height:13px"><use href="#i-refresh"/></svg> Re-generate Profile
+          </button>
+        </div>
+      </div>
+    `;
+  }
+}
+
+async function generateCompanyProfileUI() {
+  const btn = document.getElementById('btn-gen-bp');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<svg class="icon" style="width:13px;height:13px;animation:spin 1s linear infinite"><use href="#i-refresh"/></svg> Generating with Local AI...';
+  }
+  try {
+    const res = await api('/api/companies/default/generate-profile', {method: 'POST'});
+    if (res && res.business_profile) {
+      showToast('Business profile synthesized with local Ollama.', 'success');
+      await loadCompanyProfileUI();
+    } else {
+      showToast((res && res.error) || 'Failed to generate profile.', 'error');
+    }
+  } catch (err) {
+    showToast('Generation failed: ' + err.message, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="icon" style="width:13px;height:13px"><use href="#i-sparkle"/></svg> Generate Business Profile (Local AI)';
+    }
+  }
+}
+
+// ── Phase 3: Free Multi-Source Discovery & Multi-Page Crawler UI ──
+
+async function runFreeDiscoverySearch() {
+  const provider = document.getElementById('free-discovery-provider')?.value || 'all';
+  const industry = document.getElementById('free-discovery-industry')?.value || '';
+  const location = document.getElementById('free-discovery-location')?.value || '';
+  const keywords = document.getElementById('free-discovery-keywords')?.value || '';
+  const resDiv = document.getElementById('free-discovery-results');
+
+  if (resDiv) resDiv.innerHTML = '<p class="desc">Searching via free, zero-cost sources (OpenStreetMap / DuckDuckGo)...</p>';
+
+  try {
+    const data = await api('/api/discovery/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        provider: provider,
+        industry: industry,
+        location: location,
+        keywords: keywords,
+        limit: 25,
+      })
+    });
+
+    if (!data || data.error) {
+      if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(data ? data.error : 'Discovery error')}</div>`;
+      return;
+    }
+
+    if (!data.results || !data.results.length) {
+      if (resDiv) resDiv.innerHTML = '<p class="desc">No businesses found matching criteria. Try broader keywords or location.</p>';
+      return;
+    }
+
+    if (resDiv) {
+      resDiv.innerHTML = `
+        <div class="desc" style="margin-bottom:var(--sp-2)">Discovered ${data.count} candidates ($0 cost):</div>
+        <div style="display:flex;flex-direction:column;gap:var(--sp-2)">
+          ${data.results.map(r => `
+            <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm);display:flex;justify-content:space-between;align-items:center">
+              <div>
+                <strong>${escHtml(r.name || r.domain)}</strong>
+                <div class="desc">${escHtml(r.city || '')} ${r.state ? ', ' + escHtml(r.state) : ''} &bull; ${escHtml(r.website || r.domain || 'No site')}</div>
+              </div>
+              <div style="display:flex;gap:var(--sp-1);align-items:center">
+                <span class="tag good">${escHtml(r.source_provider || 'free')}</span>
+                ${r.domain ? `<button class="btn btn-secondary btn-sm" onclick="crawlTargetDomain('${escHtml(r.domain)}')">Research Site</button>` : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+async function crawlTargetDomain(domain) {
+  const modalInput = document.getElementById('target-crawl-domain-input');
+  if (modalInput) modalInput.value = domain;
+  await crawlCompanyWebsiteUI(domain);
+}
+
+async function crawlCompanyWebsiteUI(targetDomain) {
+  const domain = targetDomain || document.getElementById('target-crawl-domain-input')?.value || '';
+  const resDiv = document.getElementById('company-crawl-results');
+  if (!domain) {
+    showToast('Enter a company domain to crawl.', 'error');
+    return;
+  }
+
+  if (resDiv) resDiv.innerHTML = '<p class="desc">Running Scrapy / BeautifulSoup multi-page research crawl...</p>';
+
+  try {
+    const report = await api('/api/research/crawl-company', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        domain: domain,
+        max_pages: 8,
+        use_scrapy: true,
+        offline_only: false,
+      })
+    });
+
+    if (!report || report.error) {
+      if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(report ? report.error : 'Crawl failed')}</div>`;
+      return;
+    }
+
+    if (resDiv) {
+      resDiv.innerHTML = `
+        <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong>${escHtml(report.domain)}</strong>
+            <span class="tag ${report.from_cache ? 'accent' : 'good'}">${report.pages_crawled} pages crawled ${report.from_cache ? '(from local cache)' : '(live)'}</span>
+          </div>
+
+          <h4 style="margin:var(--sp-2) 0 4px;font-size:var(--fs-ui)">Technologies Detected</h4>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            ${(report.technologies || []).length ? report.technologies.map(t => `<span class="tag idle">${escHtml(t)}</span>`).join('') : '<span class="desc">None detected</span>'}
+          </div>
+
+          <h4 style="margin:var(--sp-2) 0 4px;font-size:var(--fs-ui)">Decision-Makers (People Collector)</h4>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            ${(report.decision_makers || []).length ? report.decision_makers.map(dm => `
+              <span class="tag good">${escHtml(dm.first_name || '')} ${escHtml(dm.last_name || '')} (${escHtml(dm.title || 'Executive')})</span>
+            `).join('') : '<span class="desc">No named decision makers identified in public HTML</span>'}
+          </div>
+
+          <h4 style="margin:var(--sp-2) 0 4px;font-size:var(--fs-ui)">ATS Job Board & Open Roles</h4>
+          ${report.ats_board ? `<div class="desc" style="margin-bottom:4px">ATS Board: <b>${escHtml(report.ats_board.label)}</b> (<a href="${escHtml(report.ats_board.page_url)}" target="_blank">${escHtml(report.ats_board.token)}</a>)</div>` : ''}
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            ${(report.hiring_roles || []).length ? report.hiring_roles.map(r => `<span class="tag wait">${escHtml(r.title || r)}</span>`).join('') : '<span class="desc">No active hiring mentions found</span>'}
+          </div>
+        </div>
+      `;
+    }
+    showToast('Company website research completed.', 'success');
+  } catch (err) {
+    if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+async function searchKnowledgeEmbeddingsUI() {
+  const query = document.getElementById('embeddings-search-input')?.value || '';
+  const resDiv = document.getElementById('embeddings-search-results');
+  if (!query) return;
+
+  if (resDiv) resDiv.innerHTML = '<p class="desc">Searching local SentenceTransformers vector store...</p>';
+
+  try {
+    const data = await api('/api/embeddings/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query: query, top_k: 5})
+    });
+
+    if (!data || !data.results || !data.results.length) {
+      if (resDiv) resDiv.innerHTML = '<p class="desc">No matching vectors found.</p>';
+      return;
+    }
+
+    if (resDiv) {
+      resDiv.innerHTML = `
+        <div class="desc" style="margin-bottom:var(--sp-2)">Top ${data.results.length} semantic matches:</div>
+        <div style="display:flex;flex-direction:column;gap:var(--sp-2)">
+          ${data.results.map(r => `
+            <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm)">
+              <div style="display:flex;justify-content:space-between">
+                <span class="tag idle">${escHtml(r.entity_type)} &bull; ${escHtml(r.entity_id)}</span>
+                <span class="tag good">Similarity: ${(r.similarity * 100).toFixed(1)}%</span>
+              </div>
+              <div class="desc" style="margin-top:var(--sp-1);color:var(--text)">${escHtml(r.chunk_text)}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}

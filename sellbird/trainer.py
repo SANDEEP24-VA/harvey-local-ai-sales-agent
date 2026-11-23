@@ -330,6 +330,11 @@ def brain_section(brain_config: BrainConfig) -> dict:
         section["model"] = brain_config.model
     if brain_config.reasoning_effort:
         section["reasoning_effort"] = brain_config.reasoning_effort
+    if brain_config.provider == "ollama":
+        if getattr(brain_config, "ollama_model", "") and brain_config.ollama_model != "qwen3:4b-instruct-2507-q4_K_M":
+            section["ollama_model"] = brain_config.ollama_model
+        if getattr(brain_config, "ollama_base_url", "") and brain_config.ollama_base_url != "http://127.0.0.1:11434":
+            section["ollama_base_url"] = brain_config.ollama_base_url
     return section
 
 

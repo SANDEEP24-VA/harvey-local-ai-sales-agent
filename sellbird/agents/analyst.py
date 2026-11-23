@@ -27,6 +27,7 @@ class Analyst:
             "generated_at": datetime.utcnow().isoformat(),
             "pipeline": await self._pipeline_summary(),
             "campaigns": await self._campaign_performance(),
+            "products": await self._product_performance(),
             "intents": await self._intent_breakdown(),
             "stages": await self._stage_breakdown(),
             "insights": [],
@@ -77,6 +78,49 @@ class Analyst:
     async def _stage_breakdown(self) -> dict:
         """Count conversations by sales stage."""
         return await self.state.get_stage_distribution()
+
+    async def _product_performance(self) -> list[dict]:
+        """Aggregate performance and conversion analytics by product."""
+        try:
+            products = await self.state.list_products(include_archived=False)
+            results = []
+            for prod in products:
+                matches = await self.state.get_prospect_product_matches(product_id=prod.id)
+                sent_count = 0
+                convo_count = 0
+                positive_count = 0
+                async with self.state._connect() as db:
+                    async with db.execute(
+                        "SELECT COUNT(*) FROM outbox WHERE product_id = ? AND status = 'sent'",
+                        (prod.id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        sent_count = row[0] if row else 0
+                    async with db.execute(
+                        "SELECT COUNT(*) FROM conversations WHERE product_id = ?",
+                        (prod.id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        convo_count = row[0] if row else 0
+                    async with db.execute(
+                        "SELECT COUNT(*) FROM conversations WHERE product_id = ? AND (intent = 'interested' OR status = 'meeting_booked')",
+                        (prod.id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        positive_count = row[0] if row else 0
+
+                results.append({
+                    "product_id": prod.id,
+                    "product_name": prod.name,
+                    "matched_prospects": len(matches),
+                    "emails_sent": sent_count,
+                    "conversations": convo_count,
+                    "positive_replies": positive_count,
+                })
+            return results
+        except Exception as e:
+            logger.debug(f"Analyst: _product_performance failed: {e}")
+            return []
 
     def _generate_insights(self, report: dict) -> list[str]:
         """Derive actionable insights from the data.

@@ -223,7 +223,8 @@ class MailProvider(ABC):
 
 def get_mail_provider(config, env) -> MailProvider | None:
     """Build the configured native provider, or None for instantly/unknown."""
-    provider = (config.channels.email.provider or "").strip().lower()
+    email_cfg = getattr(getattr(config, "channels", None), "email", None)
+    provider = (getattr(email_cfg, "provider", "") or "").strip().lower()
     if provider == "gmail":
         from sellbird.integrations.gmail import GmailProvider
         return GmailProvider(config, env)

@@ -184,31 +184,21 @@ async def _test_claude(brain: Brain) -> bool:
 
 
 def _ask_brain_config() -> BrainConfig:
-    """Ask which subscription Sellbird thinks with. Claude is the default."""
-    _print_sellbird("I think with an AI subscription you already pay for:")
-    print("    claude — your Claude plan, via Claude Code (default)")
-    print("    codex  — your ChatGPT plan, via the Codex CLI")
+    """Ask which engine Sellbird thinks with. Ollama is the supported local provider."""
+    _print_sellbird("I think with local Ollama (free, private & zero-cloud):")
+    print("    ollama — local Ollama inference (default, free & private)")
     while True:
-        provider = _ask("Which one? (claude/codex)", default="claude").lower()
-        if provider == "codex":
-            from sellbird.codex import CodexError, require_supported_platform
-            try:
-                require_supported_platform()
-            except CodexError as e:
-                print(f"    ({e})")
-                continue
+        provider = _ask("Which one? (ollama)", default="ollama").lower()
         if provider in ("claude", "codex"):
+            print(f"    ('{provider}' is disabled. Only local Ollama inference is supported.)")
+            continue
+        if provider == "ollama":
             break
-        print("    (type claude or codex)")
-    if provider == "codex":
-        from sellbird.codex import SUGGESTED_MODEL
-        print(f"    {SUGGESTED_MODEL} is the Codex model Sellbird has verified as text-only")
-        print("    (no code-execution tools). Press Enter to use it, or type another.")
+        print("    (type ollama — only local Ollama inference is supported)")
+    print("    Default model: qwen3:4b-instruct-2507-q4_K_M")
+    print("    Default endpoint: http://127.0.0.1:11434")
     while True:
-        if provider == "codex":
-            model = _ask("Model", default=SUGGESTED_MODEL, required=False)
-        else:
-            model = _ask("Model (leave blank for the default)", required=False)
+        model = _ask("Model", default="qwen3:4b-instruct-2507-q4_K_M", required=False)
         try:
             return BrainConfig(provider=provider, model=model)
         except ValidationError:
@@ -294,12 +284,28 @@ class SetupWizard:
         await self._print_summary()
 
     async def _check_prerequisites(self):
-        """Pick the brain provider and verify its CLI is installed and working."""
+        """Pick the brain provider and verify it is working."""
         self.brain_config = _ask_brain_config()
-        if self.brain_config.provider == "codex":
-            await self._check_codex()
+        if self.brain_config.provider == "ollama":
+            await self._check_ollama()
         else:
-            await self._check_claude()
+            print(f"\n✗ Unsupported provider '{self.brain_config.provider}'. Only local Ollama inference is supported.")
+            raise SystemExit(1)
+
+    async def _check_ollama(self):
+        print(f"\n  Checking Ollama ({self.brain_config.ollama_base_url})...", end=" ", flush=True)
+        state = StateManager()
+        await state.init_db()
+        brain = Brain(state, self.brain_config)
+        err = await brain.preflight()
+        if err:
+            print("✗ Failed")
+            _print_sellbird(err)
+            if not _ask_yes_no("Continue anyway?", default=False):
+                raise SystemExit(1)
+        else:
+            print("✓ Working")
+        self._check_python_packages()
 
     async def _check_claude(self):
         # Check Claude CLI
@@ -926,10 +932,10 @@ class SetupWizard:
 """)
 
         # Show what's configured
+        provider_name = "Local Ollama" if self.brain_config.provider == "ollama" else self.brain_config.provider
+        provider_ok = self.brain_config.provider == "ollama"
         checks = {
-            ("Codex CLI (ChatGPT plan)" if self.brain_config.provider == "codex"
-             else "Claude Code CLI"): (_check_codex_cli() if self.brain_config.provider == "codex"
-                                      else _check_claude_cli()),
+            provider_name: provider_ok,
             "Instantly API": bool(self.env_vars.get("INSTANTLY_API_KEY")),
             "LinkedIn": bool(self.env_vars.get("LINKEDIN_EMAIL")),
             "Cloudflare Crawl": bool(self.env_vars.get("CLOUDFLARE_ACCOUNT_ID")),

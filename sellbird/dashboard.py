@@ -1746,6 +1746,707 @@ async def get_campaigns():
     return rows
 
 
+# ── Products & Multi-Product Management ──
+
+
+@app.get("/api/products")
+async def get_products_route(include_archived: bool = False):
+    """List products, optionally including archived ones."""
+    state = _state()
+    prods = await state.list_products(include_archived=include_archived)
+    return [p.model_dump(mode="json") for p in prods]
+
+
+@app.post("/api/products")
+async def create_product_route(request: Request):
+    """Create a new product."""
+    from sellbird.models.product import ProductCreate
+    try:
+        body = await request.json()
+        p_create = ProductCreate(**body)
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid product data: {e}"}, status_code=400)
+    state = _state()
+    prod_id = await state.add_product(p_create)
+    product = await state.get_product(prod_id)
+    return JSONResponse(product.model_dump(mode="json") if product else {"id": prod_id}, status_code=201)
+
+
+@app.get("/api/products/{product_id}")
+async def get_product_by_id_route(product_id: str):
+    """Retrieve details for a single product."""
+    state = _state()
+    product = await state.get_product(product_id)
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    return product.model_dump(mode="json")
+
+
+@app.put("/api/products/{product_id}")
+async def update_product_by_id_route(product_id: str, request: Request):
+    """Update an existing product."""
+    from sellbird.models.product import ProductUpdate
+    state = _state()
+    existing = await state.get_product(product_id)
+    if not existing:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    try:
+        body = await request.json()
+        update_data = ProductUpdate(**body)
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid update data: {e}"}, status_code=400)
+
+    fields = {k: v for k, v in update_data.model_dump(exclude_unset=True).items()}
+    if fields:
+        await state.update_product(product_id, **fields)
+    updated = await state.get_product(product_id)
+    return updated.model_dump(mode="json") if updated else {"ok": True}
+
+
+@app.delete("/api/products/{product_id}")
+async def archive_product_by_id_route(product_id: str):
+    """Soft delete/archive a product."""
+    state = _state()
+    existing = await state.get_product(product_id)
+    if not existing:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    await state.archive_product(product_id)
+    return {"ok": True, "archived": True, "id": product_id}
+
+
+@app.get("/api/products/{product_id}/icp")
+async def get_product_icp_route(product_id: str):
+    """Get the ICP configuration for a product."""
+    state = _state()
+    icp = await state.get_product_icp(product_id)
+    return icp.model_dump(mode="json") if icp else None
+
+
+@app.post("/api/products/{product_id}/icp")
+async def save_product_icp_route(product_id: str, request: Request):
+    """Save or update product ICP configuration."""
+    from sellbird.models.product import ProductICP
+    try:
+        body = await request.json()
+        body["product_id"] = product_id
+        icp = ProductICP(**body)
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid ICP data: {e}"}, status_code=400)
+    state = _state()
+    icp_id = await state.add_or_update_product_icp(icp)
+    saved = await state.get_product_icp(product_id)
+    return saved.model_dump(mode="json") if saved else {"id": icp_id}
+
+
+@app.post("/api/products/{product_id}/generate-icp")
+async def generate_product_icp_route(product_id: str):
+    """Generate product-specific ICP using local Ollama Brain."""
+    from sellbird.product_intelligence import generate_product_icp
+    state = _state()
+    product = await state.get_product(product_id)
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    brain, state, _ = await _offer_brain()
+    icp = await generate_product_icp(brain, product)
+    if not icp:
+        return JSONResponse({"error": "Failed to generate ICP via local Ollama. Please ensure Ollama is running."}, status_code=502)
+    await state.add_or_update_product_icp(icp)
+    return icp.model_dump(mode="json")
+
+
+@app.post("/api/products/{product_id}/generate-intelligence")
+async def generate_product_intelligence_route(product_id: str):
+    """Generate problem statements, value props, differentiators and objections using Ollama."""
+    from sellbird.product_intelligence import generate_product_intelligence
+    state = _state()
+    product = await state.get_product(product_id)
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    brain, state, _ = await _offer_brain()
+    intel = await generate_product_intelligence(brain, product)
+    if not intel:
+        return JSONResponse({"error": "Failed to generate intelligence via local Ollama."}, status_code=502)
+    return intel
+
+
+@app.get("/api/products/{product_id}/prospects")
+async def get_product_matched_prospects_route(product_id: str, min_score: float = 0.0):
+    """Get prospects matched to this product with fit scores and reasoning."""
+    state = _state()
+    matches = await state.get_prospect_product_matches(product_id=product_id, min_score=min_score)
+    if not matches:
+        return []
+    results = []
+    for m in matches:
+        prospect = await state.get_prospect(m.prospect_id)
+        results.append({
+            "match": m.model_dump(mode="json"),
+            "prospect": prospect.model_dump(mode="json") if prospect else {
+                "id": m.prospect_id,
+                "first_name": "Unknown",
+                "last_name": "",
+                "email": "",
+                "company": "",
+                "title": "",
+            },
+        })
+    return results
+
+
+@app.post("/api/products/{product_id}/match-prospects")
+async def match_prospects_for_product_route(product_id: str, limit: int = 50):
+    """Trigger matching of prospects against this product."""
+    from sellbird.product_intelligence import match_prospect_product
+    from sellbird.models.prospect import Prospect
+    state = _state()
+    product = await state.get_product(product_id)
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+    icp = await state.get_product_icp(product_id)
+    brain, state, _ = await _offer_brain()
+    rows = await query_db("SELECT * FROM prospects ORDER BY created_at DESC LIMIT ?", (limit,))
+    matched_count = 0
+    for r in rows:
+        p = Prospect(**r)
+        match, evidence_items = await match_prospect_product(brain, p, product, icp)
+        await state.add_prospect_product_match(match)
+        for ev in evidence_items:
+            await state.add_product_research_evidence(ev)
+        matched_count += 1
+    return {"matched": matched_count, "product_id": product_id}
+
+
+@app.get("/api/products/{product_id}/evidence")
+async def get_product_evidence_route(product_id: str, prospect_id: str | None = None):
+    """Get research evidence supporting matches for this product."""
+    state = _state()
+    evidence = await state.get_product_research_evidence(product_id=product_id, prospect_id=prospect_id)
+    return [e.model_dump(mode="json") for e in evidence]
+
+
+@app.get("/api/products/{product_id}/campaigns")
+async def get_product_campaigns_route(product_id: str):
+    """Get campaigns associated with this product."""
+    rows = await query_db("SELECT * FROM campaigns WHERE product_id = ? ORDER BY created_at DESC", (product_id,))
+    for row in rows:
+        try:
+            row["sequence"] = json.loads(row.get("sequence_json", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            row["sequence"] = []
+        try:
+            row["prospect_ids"] = json.loads(row.get("prospect_ids_json", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            row["prospect_ids"] = []
+    return rows
+
+
+# ── EDXSO Milestone: Research Cache, Business Profiles, Buying Signals, Problem Statements, Simulator, Hardware & Offline Queue ──
+
+@app.get("/api/companies/{company_id}/business-profile")
+async def get_company_business_profile_route(company_id: str):
+    """Retrieve an existing business profile for a company."""
+    state = _state()
+    profile = await state.get_business_profile(company_id)
+    if not profile:
+        return JSONResponse({"error": "Business profile not found"}, status_code=404)
+    return profile.model_dump(mode="json")
+
+
+@app.post("/api/companies/{company_id}/generate-profile")
+async def generate_company_business_profile_route(company_id: str):
+    """Generate an AI-grounded business profile using local Ollama and web observations."""
+    from sellbird.product_intelligence import generate_business_profile
+    state = _state()
+    company = await state.get_company(company_id)
+    if not company:
+        return JSONResponse({"error": "Company not found"}, status_code=404)
+
+    # Fetch cached website text if available
+    site_text = ""
+    domain = company.domain or ""
+    if domain:
+        cached = await state.list_research_cache(domain=domain, limit=1)
+        if cached:
+            site_text = cached[0].extracted_text
+
+    observations = []
+    try:
+        obs_rows = await query_db(
+            "SELECT signal_code AS code, observation_detail AS detail FROM observations WHERE company_id = ? LIMIT 20",
+            (company_id,)
+        )
+        observations = obs_rows
+    except Exception:
+        pass
+
+    brain, state, _ = await _offer_brain()
+    profile = await generate_business_profile(
+        brain=brain,
+        company_id=company_id,
+        company_name=company.name,
+        domain=domain,
+        site_text=site_text,
+        observations=observations,
+    )
+    await state.save_business_profile(profile)
+    return profile.model_dump(mode="json")
+
+
+@app.post("/api/research/scrape")
+async def scrape_research_route(request: Request):
+    """Scrape or fetch from local cache a target website using ResearchEngine."""
+    from sellbird.research_engine import ResearchEngine
+    try:
+        body = await request.json()
+        url = (body.get("url") or "").strip()
+        offline_only = bool(body.get("offline_only", False))
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid request: {e}"}, status_code=400)
+
+    if not url:
+        return JSONResponse({"error": "URL parameter is required"}, status_code=400)
+
+    state = _state()
+    engine = ResearchEngine(state=state)
+    result = await engine.scrape(url, offline_only=offline_only)
+    return {
+        "url": result.url,
+        "domain": result.domain,
+        "from_cache": result.from_cache,
+        "status_code": result.status_code,
+        "error": result.error,
+        "text_preview": result.extracted_text[:1000],
+        "metadata": result.metadata,
+        "content_length": len(result.extracted_text),
+    }
+
+
+@app.get("/api/research/cache")
+async def list_research_cache_route(domain: str | None = None, limit: int = 50):
+    """List local persistent research cache entries."""
+    state = _state()
+    items = await state.list_research_cache(domain=domain, limit=limit)
+    return [
+        {
+            "id": item.id,
+            "url": item.url,
+            "domain": item.domain,
+            "status_code": item.status_code,
+            "retrieved_at": item.retrieved_at.isoformat() if item.retrieved_at else None,
+            "text_length": len(item.extracted_text),
+            "metadata": item.metadata,
+        }
+        for item in items
+    ]
+
+
+@app.post("/api/prospects/{prospect_id}/classify-signals")
+async def classify_prospect_signals_route(prospect_id: str, request: Request):
+    """Classify buying signals for a prospect using local Ollama."""
+    from sellbird.signal_intelligence import classify_buying_signals
+    state = _state()
+    prospect = await state.get_prospect(prospect_id)
+    if not prospect:
+        return JSONResponse({"error": "Prospect not found"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    product_id = body.get("product_id")
+    product = None
+    if product_id:
+        product = await state.get_product(product_id)
+
+    research_text = body.get("research_text", "")
+    source_url = body.get("source_url", "")
+
+    if not research_text and prospect.company_id:
+        company = await state.get_company(prospect.company_id)
+        if company and company.domain:
+            cached = await state.list_research_cache(domain=company.domain, limit=1)
+            if cached:
+                research_text = cached[0].extracted_text
+                source_url = cached[0].url
+
+    brain, state, _ = await _offer_brain()
+    signals = await classify_buying_signals(
+        brain=brain,
+        prospect=prospect,
+        product=product,
+        research_text=research_text,
+        source_url=source_url,
+    )
+
+    saved_signals = []
+    for sig in signals:
+        await state.add_classified_buying_signal(sig)
+        saved_signals.append(sig.model_dump(mode="json"))
+
+    return saved_signals
+
+
+@app.get("/api/prospects/{prospect_id}/signals")
+async def get_prospect_signals_route(prospect_id: str, product_id: str | None = None):
+    """Get classified buying signals for a prospect."""
+    state = _state()
+    signals = await state.get_classified_buying_signals(prospect_id=prospect_id, product_id=product_id)
+    return [s.model_dump(mode="json") for s in signals]
+
+
+@app.post("/api/prospects/{prospect_id}/products/{product_id}/generate-problem-statement")
+async def generate_problem_statement_route(prospect_id: str, product_id: str, request: Request):
+    """Generate a prospect-specific problem statement and product intelligence."""
+    from sellbird.product_intelligence import generate_prospect_problem_statement
+    state = _state()
+    prospect = await state.get_prospect(prospect_id)
+    if not prospect:
+        return JSONResponse({"error": "Prospect not found"}, status_code=404)
+    product = await state.get_product(product_id)
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    research_text = body.get("research_text", "")
+    if not research_text and prospect.company_id:
+        company = await state.get_company(prospect.company_id)
+        if company and company.domain:
+            cached = await state.list_research_cache(domain=company.domain, limit=1)
+            if cached:
+                research_text = cached[0].extracted_text
+
+    icp = await state.get_product_icp(product_id)
+    signals = await state.get_classified_buying_signals(prospect_id=prospect_id, product_id=product_id)
+
+    brain, state, _ = await _offer_brain()
+    statement = await generate_prospect_problem_statement(
+        brain=brain,
+        prospect=prospect,
+        product=product,
+        icp=icp,
+        signals=signals,
+        research_text=research_text,
+    )
+    await state.save_prospect_problem_statement(statement)
+    return statement.model_dump(mode="json")
+
+
+@app.get("/api/prospects/{prospect_id}/products/{product_id}/problem-statement")
+async def get_prospect_problem_statement_route(prospect_id: str, product_id: str):
+    """Get a prospect's problem statement for a specific product."""
+    state = _state()
+    statement = await state.get_prospect_problem_statement(prospect_id=prospect_id, product_id=product_id)
+    if not statement:
+        return JSONResponse({"error": "Problem statement not found"}, status_code=404)
+    return statement.model_dump(mode="json")
+
+
+@app.get("/api/conversations/sample-library")
+async def get_sample_conversations_route():
+    """Retrieve the sample conversation library for offline reply testing."""
+    from sellbird.agents.handler import SAMPLE_CONVERSATIONS
+    return SAMPLE_CONVERSATIONS
+
+
+@app.post("/api/conversations/test-classify")
+async def test_classify_reply_route(request: Request):
+    """Simulate reply classification and response preview without live sending or saving."""
+    from sellbird.agents.handler import Handler
+    from sellbird.models.prospect import Prospect
+    try:
+        body = await request.json()
+        reply_text = (body.get("reply_text") or "").strip()
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid request: {e}"}, status_code=400)
+
+    if not reply_text:
+        return JSONResponse({"error": "reply_text is required"}, status_code=400)
+
+    state = _state()
+    prospect = None
+    if body.get("prospect_id"):
+        prospect = await state.get_prospect(body["prospect_id"])
+    elif body.get("prospect"):
+        try:
+            prospect = Prospect(**body["prospect"])
+        except Exception:
+            pass
+
+    product = None
+    if body.get("product_id"):
+        product = await state.get_product(body["product_id"])
+
+    history = body.get("history", [])
+
+    brain, state, config = await _offer_brain()
+    try:
+        from sellbird.config import load_env
+        env = load_env()
+    except Exception:
+        from types import SimpleNamespace
+        env = SimpleNamespace(instantly_api_key="")
+
+    handler = Handler(brain=brain, state=state, config=config, env=env)
+    result = await handler.test_classify_reply(
+        reply_text=reply_text,
+        prospect=prospect,
+        product=product,
+        history=history,
+    )
+    return result
+
+
+@app.get("/api/system/hardware-profile")
+async def get_hardware_profile_route():
+    """Get the host hardware profile, tier rating, and Ollama model recommendations."""
+    from sellbird.hardware_profiler import get_hardware_profile
+    return get_hardware_profile()
+
+
+@app.get("/api/tasks/queue")
+async def get_offline_tasks_route(status: str | None = None, task_type: str | None = None, limit: int = 50):
+    """List offline asynchronous tasks."""
+    state = _state()
+    tasks = await state.get_pending_offline_tasks(task_type=task_type, limit=limit)
+    return [t.model_dump(mode="json") for t in tasks]
+
+
+@app.post("/api/tasks/queue")
+async def create_offline_task_route(request: Request):
+    """Queue a task for offline asynchronous execution."""
+    try:
+        body = await request.json()
+        task_type = body.get("task_type", "")
+        payload = body.get("payload", {})
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid task data: {e}"}, status_code=400)
+
+    if not task_type:
+        return JSONResponse({"error": "task_type is required"}, status_code=400)
+
+    state = _state()
+    task_id = await state.queue_offline_task(task_type=task_type, payload=payload)
+    return {"id": task_id, "status": "pending", "task_type": task_type}
+
+
+@app.post("/api/tasks/queue/{task_id}/retry")
+async def retry_offline_task_route(task_id: str):
+    """Reset an offline task to pending status for retry."""
+    state = _state()
+    await state.update_offline_task_status(task_id, status="pending", error_message="")
+    return {"id": task_id, "status": "pending"}
+
+
+# ── Phase 3: Advanced Prospect Discovery, Research & Local Intelligence ──
+
+@app.post("/api/discovery/search")
+async def discovery_search_route(request: Request):
+    """Execute zero-cost multi-source discovery using OSM or DuckDuckGo."""
+    from sellbird.collectors.discover import (
+        PERMITTED_FREE_PROVIDERS,
+        PROHIBITED_PAID_PROVIDERS,
+        run_discovery,
+    )
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid JSON body: {e}"}, status_code=400)
+
+    provider = str(body.get("provider", "all")).strip().lower()
+    if provider in PROHIBITED_PAID_PROVIDERS:
+        return JSONResponse(
+            {
+                "error": f"Prohibited discovery provider '{provider}'. Only free, zero-cloud sources ({', '.join(PERMITTED_FREE_PROVIDERS)}) are permitted.",
+                "permitted_providers": list(PERMITTED_FREE_PROVIDERS),
+            },
+            status_code=400,
+        )
+
+    industry = str(body.get("industry", "")).strip()
+    location = str(body.get("location", "")).strip()
+    limit = int(body.get("limit", 25))
+    tags = body.get("keywords") or body.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+    provider_keys = ["osm", "ddg"] if provider in ("all", "free") else [provider]
+    all_results = []
+    seen_domains = set()
+
+    for p_key in provider_keys:
+        if p_key not in PERMITTED_FREE_PROVIDERS:
+            continue
+        try:
+            candidates = await run_discovery(
+                provider_key=p_key,
+                industry=industry,
+                location=location,
+                tags=tags,
+                limit=limit,
+            )
+            for c in candidates:
+                dom = (c.get("domain") or "").lower().lstrip("www.")
+                if dom and dom in seen_domains:
+                    continue
+                if dom:
+                    seen_domains.add(dom)
+                c["source_provider"] = p_key
+                all_results.append(c)
+        except Exception as e:
+            logger.warning(f"Discovery search failed on {p_key}: {e}")
+
+    return {
+        "results": all_results[:limit],
+        "count": len(all_results[:limit]),
+        "providers_used": provider_keys,
+        "is_zero_cost": True,
+    }
+
+
+@app.post("/api/research/crawl-company")
+async def crawl_company_route(request: Request):
+    """Crawl or retrieve from offline cache key pages of a company website."""
+    from sellbird.research_engine import crawl_company_website
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid JSON body: {e}"}, status_code=400)
+
+    domain_or_url = (body.get("domain") or body.get("url") or "").strip()
+    if not domain_or_url:
+        return JSONResponse({"error": "domain or url is required"}, status_code=400)
+
+    max_pages = int(body.get("max_pages", 8))
+    use_scrapy = bool(body.get("use_scrapy", True))
+    render_js = bool(body.get("render_js", False))
+    offline_only = bool(body.get("offline_only", False))
+
+    state = _state()
+    report = await crawl_company_website(
+        domain_or_url=domain_or_url,
+        max_pages=max_pages,
+        use_scrapy=use_scrapy,
+        render_js=render_js,
+        offline_only=offline_only,
+        state=state,
+    )
+    return report
+
+
+@app.get("/api/research/cache/inspect")
+async def inspect_research_cache_route(domain: str | None = None, limit: int = 50):
+    """Inspect detailed local research cache entries with content hashes and extracted text."""
+    state = _state()
+    items = await state.list_research_cache(domain=domain, limit=limit)
+    return [
+        {
+            "id": item.id,
+            "url": item.url,
+            "domain": item.domain,
+            "content_hash": item.content_hash,
+            "status_code": item.status_code,
+            "retrieved_at": item.retrieved_at.isoformat() if hasattr(item.retrieved_at, "isoformat") else str(item.retrieved_at),
+            "text_length": len(item.extracted_text),
+            "extracted_text_preview": item.extracted_text[:400],
+            "metadata": item.metadata,
+        }
+        for item in items
+    ]
+
+
+@app.post("/api/embeddings/index")
+async def index_embeddings_route(request: Request):
+    """Index document text into local SQLite vector storage using SentenceTransformers."""
+    from sellbird.embeddings import LocalEmbeddingEngine
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid JSON: {e}"}, status_code=400)
+
+    entity_type = str(body.get("entity_type", "document")).strip()
+    entity_id = str(body.get("entity_id", "")).strip()
+    text = str(body.get("text", "")).strip()
+    metadata = body.get("metadata") or {}
+
+    if not entity_id or not text:
+        return JSONResponse({"error": "entity_id and text are required"}, status_code=400)
+
+    engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+    chunks = engine.index_document(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        text=text,
+        metadata=metadata,
+    )
+    return {"status": "indexed", "entity_type": entity_type, "entity_id": entity_id, "chunks_indexed": chunks}
+
+
+@app.post("/api/embeddings/search")
+async def search_embeddings_route(request: Request):
+    """Perform local semantic vector search across indexed knowledge."""
+    from sellbird.embeddings import LocalEmbeddingEngine
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid JSON: {e}"}, status_code=400)
+
+    query = str(body.get("query", "")).strip()
+    if not query:
+        return JSONResponse({"error": "query parameter is required"}, status_code=400)
+
+    entity_type = body.get("entity_type")
+    top_k = int(body.get("top_k", 5))
+    min_sim = float(body.get("min_similarity", 0.20))
+
+    engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+    results = engine.search(
+        query=query,
+        entity_type=entity_type,
+        top_k=top_k,
+        min_similarity=min_sim,
+    )
+    return {"query": query, "results": results, "count": len(results)}
+
+
+@app.post("/api/products/{product_id}/opportunity-score")
+async def calculate_product_opportunity_score_route(product_id: str, request: Request):
+    """Calculate versioned, explainable opportunity score for a prospect-product pair."""
+    from sellbird.product_intelligence import calculate_opportunity_score
+
+    state = _state()
+    product = await state.get_product(product_id)
+    if not product:
+        return JSONResponse({"error": "Product not found"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    icp_fit = float(body.get("icp_fit", 50.0))
+    prospect_id = body.get("prospect_id")
+
+    signals = body.get("signals") or []
+    if not signals and prospect_id:
+        signals = await state.get_classified_buying_signals(prospect_id=prospect_id, product_id=product_id)
+
+    res = calculate_opportunity_score(
+        icp_fit=icp_fit,
+        verified_signals=signals,
+        product=product,
+    )
+    return res
+
+
 @app.get("/api/prospects/{prospect_id}/opt-out")
 async def get_opt_out(prospect_id: str):
     """Why this person is opted out: the rule, the words and their message."""

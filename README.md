@@ -38,6 +38,16 @@ It runs on your own machine, and by default nothing goes out until you approve i
 
 <sub>The demo data is invented: "Bookwell" selling online booking to roofers, dental practices and HVAC shops, on `.test` domains.</sub>
 
+> ### 🚀 EDXSO Assignment 2: Local Multi-Product AI Sales Agent Extension
+> This repository has been extended to satisfy the **EDXSO AI Engineer Internship Assignment 2**:
+> - **100% Local Inference with Ollama (`qwen3:4b-instruct-2507-q4_K_M`)**: Zero cloud LLM dependencies, zero per-token cost, zero data leakage.
+> - **Multi-Product Catalog (Migration v17 & v18)**: Manage multiple product offerings, distinct ICPs, and many-to-many prospect matching.
+> - **Evidence-Grounded Research Engine**: Safe web crawler with SSRF protection, robots.txt compliance, BeautifulSoup parsing, and local SQLite caching.
+> - **29 Buying Signal Intelligence**: Automatic detection of tech stack signatures and hiring mentions with verbatim citation verification.
+> - **Hardware-Aware Local AI Profiler (`sellbird hardware`)**: Automatic host profiling (CPU, RAM, NVIDIA GPU/VRAM) with model tier recommendations (`Laptop`, `Workstation`, `High Performance`).
+> - **Interactive Reply Simulator & Task Queue**: Offline workbench in the dashboard simulating B2B conversations, opt-out safety, and async task resilience.
+> - **Detailed Submission Report**: See [docs/EDXSO_SUBMISSION.md](docs/EDXSO_SUBMISSION.md) for complete architecture, 8 workflow verification matrix, and video demo script.
+
 ## What it does
 
 Sellbird is a pipeline you can run end to end, or stop at any step.
