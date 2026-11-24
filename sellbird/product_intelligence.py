@@ -648,12 +648,21 @@ Return ONLY valid JSON."""
 
     now = _utcnow()
     citations = []
+    from sellbird.research_engine import verify_evidence_quote
     for c in data.get("evidence_citations", []):
         if isinstance(c, dict) and c.get("quote"):
+            quote = str(c.get("quote", "")).strip()
+            is_verified = (
+                verify_evidence_quote(research_text or "", quote)
+                or any(verify_evidence_quote(getattr(s, "supporting_evidence", "") or "", quote) for s in (signals or []))
+                or quote.lower() in f"{prospect.full_name()} {prospect.title} {prospect.company} {prospect.industry}".lower()
+            )
+            v_status = "verified_observation" if is_verified else "model_inference"
             citations.append({
                 "source": str(c.get("source", "Prospect Data")).strip(),
-                "quote": str(c.get("quote", "")).strip(),
+                "quote": quote,
                 "relevance": str(c.get("relevance", "")).strip(),
+                "verification_status": v_status,
             })
 
     return ProspectProblemStatement(

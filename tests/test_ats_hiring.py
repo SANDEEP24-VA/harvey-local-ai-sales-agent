@@ -401,8 +401,9 @@ def test_the_hiring_preset_falls_back_to_titles_and_needs_search():
     terms = [q.term for q in build_queries(_config(hiring=()), preset="hiring")]
     assert len(terms) == 1 and '"ceo"' in terms[0]
     assert preset_problem("hiring", "osm")
-    assert preset_problem("hiring", "serper") is None
-    assert preset_problem("hiring", "tinyfish") is None
+    assert preset_problem("hiring", "ddg") is None
+    assert "disabled" in preset_problem("hiring", "serper")
+    assert "disabled" in preset_problem("hiring", "tinyfish")
     assert "hiring" in PRESETS
 
 
@@ -582,10 +583,11 @@ def test_role_equivalences_and_assistants(keyword, title, hit):
 
 def test_the_hiring_preset_needs_roles():
     empty = _config(titles=(), hiring=())
-    problem = preset_problem("hiring", "serper", config=empty)
+    problem = preset_problem("hiring", "ddg", config=empty)
     assert problem and "hiring_signals" in problem
-    assert preset_problem("hiring", "serper", config=_config()) is None
-    assert preset_problem("yc", "serper", config=empty) is None
+    assert preset_problem("hiring", "ddg", config=_config()) is None
+    assert preset_problem("yc", "ddg", config=empty) is None
+    assert "disabled" in preset_problem("hiring", "serper", config=_config())
 
 
 @pytest.mark.parametrize("domain", [

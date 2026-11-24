@@ -603,6 +603,25 @@ class Writer:
         except Exception as e:
             logger.debug(f"Writer: could not load problem statement or signals: {e}")
 
+        # Local RAG: Retrieve grounded product proof points and prospect web research
+        try:
+            prod_id = product.id if product else None
+            from sellbird.embeddings import LocalEmbeddingEngine, RAGContextBuilder
+            db_p = getattr(self.state, "db_path", None)
+            engine = LocalEmbeddingEngine(db_path=str(db_p) if db_p else None)
+            rag = RAGContextBuilder(engine, max_tokens=1000)
+            rag_query = f"{prospect.title or ''} {prospect.company or ''} {prospect.industry or ''} {product.name if product else ''}"
+            rag_res = rag.build_context(
+                query=rag_query,
+                product_id=prod_id,
+                prospect_id=prospect.id,
+                top_k=3,
+            )
+            if rag_res.get("context_block"):
+                facts.append(f"\n{rag_res['context_block']}")
+        except Exception as e:
+            logger.debug(f"Writer: RAG retrieval skipped ({e})")
+
         p_name = product.name if product else self.config.product.name
         p_desc = product.description if product else self.config.product.description
         p_benefits = "\n".join(f"- {b}" for b in (product.benefits or product.features)) if product else "\n".join(f"- {b}" for b in self.config.product.key_benefits)

@@ -83,6 +83,7 @@
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
       <button onclick="showTab('company', this)"><svg class="icon" aria-hidden="true"><use href="#i-company"/></svg><span class="label">Your company</span><span class="nav-count" id="nav-company"></span></button>
       <button onclick="showTab('products', this)"><svg class="icon" aria-hidden="true"><use href="#i-products"/></svg><span class="label">Products</span><span class="nav-count" id="nav-products"></span></button>
+      <button onclick="showTab('knowledge', this)"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg><span class="label">Knowledge Base</span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('inboxes', this)"><svg class="icon" aria-hidden="true"><use href="#i-inboxes"/></svg><span class="label">Inboxes</span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
@@ -291,6 +292,59 @@
         <button type="submit" class="btn btn-primary" id="pm-submit-btn">Save Product</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Knowledge Base & Local RAG -->
+<div id="knowledge" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Local Knowledge Base & RAG</h2>
+      <p>Manage grounded local sales knowledge, inspect indexed document chunks, and test hybrid semantic and BM25 full-text retrieval.</p>
+    </div>
+    <div style="display:flex;gap:var(--sp-2)">
+      <button class="btn btn-secondary" onclick="reindexKnowledgeBaseUI()"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg> Reindex Knowledge</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:var(--sp-4)">
+    <div class="card-head"><h3>Hybrid RAG Query & Search Testing</h3></div>
+    <div style="padding:var(--sp-3)">
+      <p class="desc" style="margin-bottom:var(--sp-3)">Test hybrid dense (SentenceTransformers) + lexical (SQLite FTS5 BM25) retrieval with Reciprocal Rank Fusion (RRF) and explainable rankings.</p>
+      <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center">
+        <input type="text" id="knowledge-search-input" placeholder="Enter query (e.g. database scaling, pricing objection, SOC2 compliance)..." style="flex:1;min-width:240px;padding:var(--sp-2);border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface)" onkeydown="if(event.key==='Enter') searchKnowledgeHybridUI()">
+        <select id="knowledge-search-product" style="min-width:160px;padding:var(--sp-2);border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface)">
+          <option value="">All Products (Global)</option>
+        </select>
+        <button class="btn btn-primary" onclick="searchKnowledgeHybridUI()">Search Knowledge</button>
+      </div>
+      <div id="knowledge-search-results" style="margin-top:var(--sp-3)"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head" style="display:flex;justify-content:space-between;align-items:center">
+      <h3>Indexed Knowledge Documents</h3>
+      <span class="desc" id="knowledge-docs-count">0 documents</span>
+    </div>
+    <div id="knowledge-docs-table-wrap" style="overflow-x:auto;padding:var(--sp-2)">
+      <table class="table" style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border);text-align:left">
+            <th style="padding:var(--sp-2)">Type</th>
+            <th style="padding:var(--sp-2)">Entity ID / Name</th>
+            <th style="padding:var(--sp-2)">Product</th>
+            <th style="padding:var(--sp-2)">Chunks</th>
+            <th style="padding:var(--sp-2)">Verification</th>
+            <th style="padding:var(--sp-2)">Indexed Date</th>
+            <th style="padding:var(--sp-2)">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="knowledge-docs-tbody">
+          <tr><td colspan="7" class="desc" style="text-align:center;padding:var(--sp-4)">Click Knowledge Base to load documents.</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 

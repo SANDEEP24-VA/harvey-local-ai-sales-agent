@@ -117,12 +117,13 @@ def test_the_yc_preset_searches_for_companies_that_say_so():
 
 def test_the_yc_preset_needs_a_search_provider():
     assert preset_problem("yc", "osm") and "search" in preset_problem("yc", "osm")
-    assert preset_problem("yc", "dataforseo_listings")
-    assert preset_problem("yc", "serper") is None
-    assert preset_problem("yc", "tinyfish") is None
-    assert preset_problem("yc", "dataforseo_serp") is None
+    assert "disabled" in preset_problem("yc", "dataforseo_listings")
+    assert preset_problem("yc", "ddg") is None
+    assert "disabled" in preset_problem("yc", "serper")
+    assert "disabled" in preset_problem("yc", "tinyfish")
+    assert "disabled" in preset_problem("yc", "dataforseo_serp")
     assert preset_problem("", "osm") is None
-    assert preset_problem("nope", "serper")
+    assert preset_problem("nope", "osm")
 
 
 @pytest.mark.parametrize("domain", [
@@ -144,7 +145,7 @@ def test_cli_estimate_with_the_preset(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(state_mod, "StateManager", lambda *a, **k: real(str(tmp_path / "c.db")))
     monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: _config())
     monkeypatch.setattr(config_mod, "load_env", lambda: SimpleNamespace(model_dump=lambda: {}))
-    args = argparse.Namespace(providers=False, provider="serper", city="", depth=30, limit=100,
+    args = argparse.Namespace(providers=False, provider="ddg", city="", depth=30, limit=100,
                               max_spend=1.0, estimate=True, preset="yc")
     cli.cmd_discover(args)
     out = capsys.readouterr().out
@@ -242,10 +243,12 @@ def test_the_dashboard_estimate_takes_the_preset(monkeypatch):
     from tests.test_dashboard_signals import client as _client  # noqa: F401
     import sellbird.config as config_mod
     monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: _config())
-    queries = dash._discovery_queries({"provider": "serper", "preset": "yc"}, _config())
+    queries = dash._discovery_queries({"provider": "ddg", "preset": "yc"}, _config())
     assert all('"backed by Y Combinator"' in q.term for q in queries)
     with pytest.raises(ValueError):
         dash._discovery_queries({"provider": "osm", "preset": "yc"}, _config())
+    with pytest.raises(ValueError, match="disabled"):
+        dash._discovery_queries({"provider": "serper", "preset": "yc"}, _config())
 
 
 # ── what real YC company sites look like (checked against live homepages) ──

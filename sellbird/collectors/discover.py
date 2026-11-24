@@ -1115,16 +1115,6 @@ class OpenStreetMap(DiscoveryProvider):
         "panader": ['shop=bakery'],
         "clinica": ['amenity=clinic'],
         "clínica": ['amenity=clinic'],
-        # B2B software, technology & consulting
-        "software": ['office=it', 'office=software', 'office=company'],
-        "tech": ['office=it', 'office=company'],
-        "it": ['office=it'],
-        "security": ['office=security', 'office=it'],
-        "consult": ['office=consulting', 'office=management'],
-        "market": ['office=advertising', 'office=marketing'],
-        "saas": ['office=it', 'office=company'],
-        "cloud": ['office=it', 'office=telecommunication'],
-        "ai": ['office=it', 'office=research'],
     }
 
     def _tags(self, term: str) -> list[str]:

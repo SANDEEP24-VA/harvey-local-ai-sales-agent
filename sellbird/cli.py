@@ -609,7 +609,7 @@ def cmd_discover(args):
     from sellbird.state import StateManager
     from sellbird.config import load_config, load_env
     from sellbird.collectors.discover import (
-        PROVIDERS, build_queries, preset_problem, provider_menu, run_discovery,
+        PROVIDERS, PROHIBITED_PAID_PROVIDERS, build_queries, preset_problem, provider_menu, run_discovery,
     )
 
     async def _discover():
@@ -628,6 +628,16 @@ def cmd_discover(args):
                     print(f"    Note: {m['caveat']}")
             print("\n  Run one with: sellbird discover --provider <key> --estimate\n")
             return
+
+        if args.provider in PROHIBITED_PAID_PROVIDERS:
+            print("\n  " + "!" * 68)
+            print(f"  ERROR: provider skipped: missing key - Paid provider {args.provider!r} is disabled.")
+            print(f"  Missing or empty: {args.provider.upper()}_API_KEY")
+            print("  This deployment exclusively supports free public discovery (osm, ddg).")
+            print("  0 queries can run.")
+            print("  All providers and their keys: sellbird discover --providers")
+            print("  " + "!" * 68 + "\n")
+            raise SystemExit(1)
 
         if args.provider not in PROVIDERS:
             print(f"\n  Unknown provider {args.provider!r}. "

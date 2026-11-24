@@ -1476,6 +1476,25 @@ Respond with ONLY the category label, nothing else."""
                     objection_context = f"\nSuggested approach for this objection: {response}"
                     break
 
+            # If substring did not match, use Local RAG hybrid semantic retrieval for objection playbooks
+            if not objection_context:
+                try:
+                    from sellbird.embeddings import LocalEmbeddingEngine
+                    db_p = getattr(self.state, "db_path", None)
+                    engine = LocalEmbeddingEngine(db_path=str(db_p) if db_p else None)
+                    p_id = getattr(product, "id", None) if product else None
+                    matches = engine.search_hybrid(
+                        query=reply_text,
+                        product_id=p_id,
+                        entity_type="objection_playbook",
+                        top_k=1,
+                    )
+                    if matches:
+                        best = matches[0]
+                        objection_context = f"\nRetrieved objection playbook:\n{best['chunk_text']}"
+                except Exception as e:
+                    logger.debug(f"Handler: semantic objection retrieval skipped ({e})")
+
         # Only an interested prospect (or a thread already closing) should be
         # moved to the configured next step. Everything else gets an answer,
         # not a pitch.

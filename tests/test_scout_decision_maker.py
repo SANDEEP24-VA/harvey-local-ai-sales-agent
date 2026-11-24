@@ -414,6 +414,7 @@ async def test_scout_search_tinyfish():
 
 @pytest.mark.asyncio
 async def test_scout_search_web_uses_tinyfish_backend():
+    """Verify that TinyFish is disabled and not invoked even if an API key is set."""
     scout = site_scout({})
     scout.env.tinyfish_api_key = "tf_key"
     called = []
@@ -422,8 +423,14 @@ async def test_scout_search_web_uses_tinyfish_backend():
         called.append(("tinyfish", query, key))
         return [("https://summit.example", "Roofing in Denver")]
 
+    async def fake_ddg(query):
+        called.append(("ddg", query))
+        return [("https://summit.example", "Roofing in Denver")]
+
     scout._search_tinyfish = fake_tinyfish
+    scout._search_duckduckgo = fake_ddg
     results = await scout._web_search("Denver roofers")
-    assert called == [("tinyfish", "Denver roofers", "tf_key")]
+    assert called == [("ddg", "Denver roofers")]
+    assert ("tinyfish", "Denver roofers", "tf_key") not in called
     assert len(results) == 1
     assert results[0][0] == "https://summit.example"

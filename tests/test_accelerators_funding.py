@@ -292,8 +292,9 @@ def test_the_funding_preset_searches_recent_announcements():
 @pytest.mark.parametrize("preset", ["accelerator", "funding"])
 def test_the_presets_need_a_search_provider(preset):
     assert preset_problem(preset, "osm")
-    assert preset_problem(preset, "serper") is None
-    assert preset_problem(preset, "tinyfish") is None
+    assert preset_problem(preset, "ddg") is None
+    assert "disabled" in preset_problem(preset, "serper")
+    assert "disabled" in preset_problem(preset, "tinyfish")
 
 
 @pytest.mark.parametrize("domain", [
@@ -330,7 +331,9 @@ def test_cli_and_dashboard_take_the_presets():
     import sellbird.dashboard as dash
     from sellbird.paths import PROJECT_ROOT
     for preset in ("accelerator", "funding"):
-        assert dash._discovery_queries({"provider": "serper", "preset": preset}, _config())
+        assert dash._discovery_queries({"provider": "ddg", "preset": preset}, _config())
+        with pytest.raises(ValueError, match="disabled"):
+            dash._discovery_queries({"provider": "serper", "preset": preset}, _config())
     cli = (PROJECT_ROOT / "sellbird" / "cli.py").read_text(encoding="utf-8")
     choices = re.search(r'"--preset", default="", choices=\[([^\]]*)\]', cli).group(1)
     assert '"accelerator"' in choices and '"funding"' in choices
@@ -343,7 +346,8 @@ def test_every_preset_checks_and_builds_whether_it_has_one_term_or_several():
     config = _config()
     config.icp.hiring_signals, config.icp.titles = ["Head of Sales"], ["CEO"]
     for preset in PRESETS:
-        assert preset_problem(preset, "serper", config) is None
+        assert preset_problem(preset, "ddg", config) is None
+        assert "disabled" in preset_problem(preset, "serper", config)
         queries = build_queries(config, preset=preset)
         assert queries and all("{" not in q.term for q in queries)
 

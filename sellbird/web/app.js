@@ -431,6 +431,7 @@ function loadCurrentTab() {
     case 'reply-sim': loadReplySimulator(); break;
     case 'hardware-view': loadHardwareProfileView(); break;
     case 'tasks-view': loadTaskQueueView(); break;
+    case 'knowledge': loadKnowledgeBaseUI(); break;
   }
 }
 
@@ -4469,6 +4470,130 @@ async function runFreeDiscoverySearch() {
   }
 }
 
+// ── Knowledge Base & Local RAG Management ──
+
+async function loadKnowledgeBaseUI() {
+  const tbody = document.getElementById('knowledge-docs-tbody');
+  const countEl = document.getElementById('knowledge-docs-count');
+  const prodSelect = document.getElementById('knowledge-search-product');
+
+  try {
+    // Populate products in dropdown
+    const prodsData = await api('/api/products');
+    if (prodSelect && Array.isArray(prodsData)) {
+      prodSelect.innerHTML = '<option value="">All Products (Global)</option>' +
+        prodsData.map(p => `<option value="${p.id}">${escHtml(p.name)} (${p.sku || p.id})</option>`).join('');
+    }
+
+    const data = await api('/api/knowledge/documents');
+    const docs = data?.documents || [];
+    if (countEl) countEl.textContent = `${docs.length} document${docs.length === 1 ? '' : 's'}`;
+
+    if (!tbody) return;
+    if (!docs.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="desc" style="text-align:center;padding:var(--sp-4)">No indexed documents yet. Click "Reindex Knowledge" to populate from products and research.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = docs.map(d => `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:var(--sp-2)"><span class="tag idle">${escHtml(d.entity_type)}</span></td>
+        <td style="padding:var(--sp-2);font-weight:500">${escHtml(d.entity_id)}</td>
+        <td style="padding:var(--sp-2)">${d.product_id ? `<span class="tag good">${escHtml(d.product_id)}</span>` : (d.is_global ? '<span class="tag info">Global</span>' : '<span class="desc">None</span>')}</td>
+        <td style="padding:var(--sp-2)"><strong>${d.chunk_count}</strong> chunk${d.chunk_count === 1 ? '' : 's'}</td>
+        <td style="padding:var(--sp-2)"><span class="tag ${d.verification_status === 'verified_observation' ? 'good' : 'idle'}">${escHtml(d.verification_status || 'verified_observation')}</span></td>
+        <td style="padding:var(--sp-2)" class="desc">${d.indexed_at ? d.indexed_at.slice(0, 10) : ''}</td>
+        <td style="padding:var(--sp-2)">
+          <button class="btn btn-secondary" style="padding:2px 8px;font-size:11px" onclick="deleteKnowledgeDocUI('${escHtml(d.entity_type)}', '${escHtml(d.entity_id)}')">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="tag bad">${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function reindexKnowledgeBaseUI() {
+  showToast('Reindexing local knowledge from products and research...', 'info');
+  try {
+    const res = await api('/api/knowledge/reindex', { method: 'POST' });
+    showToast(`Reindexed: ${res.products_indexed} products, ${res.total_chunks_indexed} total chunks.`, 'success');
+    await loadKnowledgeBaseUI();
+  } catch (err) {
+    showToast(`Reindex failed: ${err.message}`, 'error');
+  }
+}
+
+async function searchKnowledgeHybridUI() {
+  const query = document.getElementById('knowledge-search-input')?.value.trim() || '';
+  const prodId = document.getElementById('knowledge-search-product')?.value || '';
+  const resDiv = document.getElementById('knowledge-search-results');
+  if (!query) {
+    showToast('Enter a query to search knowledge.', 'warning');
+    return;
+  }
+
+  if (resDiv) resDiv.innerHTML = '<p class="desc">Performing hybrid dense (vector) + lexical (BM25) search...</p>';
+
+  try {
+    const data = await api('/api/knowledge/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, product_id: prodId || null, top_k: 5 }),
+    });
+
+    if (!data || !data.results || !data.results.length) {
+      if (resDiv) resDiv.innerHTML = '<p class="desc" style="padding:var(--sp-3)">No matching knowledge chunks found.</p>';
+      return;
+    }
+
+    if (resDiv) {
+      resDiv.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-2)">
+          <span class="desc">Found ${data.count} matches (Mode: <strong>${escHtml(data.retrieval_mode)}</strong>)</span>
+          <span class="tag ${data.semantic_engine_available ? 'good' : 'warning'}">${data.semantic_engine_available ? 'Neural Semantic Active' : 'Degraded Lexical Only'}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:var(--sp-3)">
+          ${data.results.map((r, i) => `
+            <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm);border-left:3px solid var(--accent)">
+              <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-1);margin-bottom:var(--sp-2)">
+                <div style="display:flex;gap:var(--sp-2);align-items:center">
+                  <strong>#${i + 1}</strong>
+                  <span class="tag idle">${escHtml(r.entity_type)}</span>
+                  ${r.product_id ? `<span class="tag info">${escHtml(r.product_id)}</span>` : ''}
+                  <span class="tag ${r.verification_status === 'verified_observation' ? 'good' : 'idle'}">${escHtml(r.verification_status || 'verified_observation')}</span>
+                </div>
+                <div style="display:flex;gap:var(--sp-2);font-size:12px">
+                  <span>RRF: <strong>${r.score.toFixed(4)}</strong></span>
+                  ${r.similarity ? `<span class="desc">Dense Sim: ${(r.similarity * 100).toFixed(1)}%</span>` : ''}
+                  ${r.bm25_rank !== undefined ? `<span class="desc">BM25: ${r.bm25_rank.toFixed(2)}</span>` : ''}
+                </div>
+              </div>
+              <div class="desc" style="color:var(--text);white-space:pre-wrap;line-height:1.5">${escHtml(r.chunk_text)}</div>
+              ${r.source_url ? `<div class="desc" style="margin-top:var(--sp-2);font-size:11px"><a href="${escHtml(r.source_url)}" target="_blank" rel="noopener">${escHtml(r.source_url)}</a></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+async function deleteKnowledgeDocUI(entity_type, entity_id) {
+  if (!confirm(`Delete indexed knowledge for ${entity_type}:${entity_id}?`)) return;
+  try {
+    await api(`/api/knowledge/documents?entity_type=${encodeURIComponent(entity_type)}&entity_id=${encodeURIComponent(entity_id)}`, {
+      method: 'DELETE',
+    });
+    showToast('Knowledge document deleted.', 'success');
+    await loadKnowledgeBaseUI();
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`, 'error');
+  }
+}
+
 async function crawlTargetDomain(domain) {
   const modalInput = document.getElementById('target-crawl-domain-input');
   if (modalInput) modalInput.value = domain;
@@ -4536,6 +4661,130 @@ async function crawlCompanyWebsiteUI(targetDomain) {
   }
 }
 
+// ── Knowledge Base & Local RAG Management ──
+
+async function loadKnowledgeBaseUI() {
+  const tbody = document.getElementById('knowledge-docs-tbody');
+  const countEl = document.getElementById('knowledge-docs-count');
+  const prodSelect = document.getElementById('knowledge-search-product');
+
+  try {
+    // Populate products in dropdown
+    const prodsData = await api('/api/products');
+    if (prodSelect && Array.isArray(prodsData)) {
+      prodSelect.innerHTML = '<option value="">All Products (Global)</option>' +
+        prodsData.map(p => `<option value="${p.id}">${escHtml(p.name)} (${p.sku || p.id})</option>`).join('');
+    }
+
+    const data = await api('/api/knowledge/documents');
+    const docs = data?.documents || [];
+    if (countEl) countEl.textContent = `${docs.length} document${docs.length === 1 ? '' : 's'}`;
+
+    if (!tbody) return;
+    if (!docs.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="desc" style="text-align:center;padding:var(--sp-4)">No indexed documents yet. Click "Reindex Knowledge" to populate from products and research.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = docs.map(d => `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:var(--sp-2)"><span class="tag idle">${escHtml(d.entity_type)}</span></td>
+        <td style="padding:var(--sp-2);font-weight:500">${escHtml(d.entity_id)}</td>
+        <td style="padding:var(--sp-2)">${d.product_id ? `<span class="tag good">${escHtml(d.product_id)}</span>` : (d.is_global ? '<span class="tag info">Global</span>' : '<span class="desc">None</span>')}</td>
+        <td style="padding:var(--sp-2)"><strong>${d.chunk_count}</strong> chunk${d.chunk_count === 1 ? '' : 's'}</td>
+        <td style="padding:var(--sp-2)"><span class="tag ${d.verification_status === 'verified_observation' ? 'good' : 'idle'}">${escHtml(d.verification_status || 'verified_observation')}</span></td>
+        <td style="padding:var(--sp-2)" class="desc">${d.indexed_at ? d.indexed_at.slice(0, 10) : ''}</td>
+        <td style="padding:var(--sp-2)">
+          <button class="btn btn-secondary" style="padding:2px 8px;font-size:11px" onclick="deleteKnowledgeDocUI('${escHtml(d.entity_type)}', '${escHtml(d.entity_id)}')">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="tag bad">${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function reindexKnowledgeBaseUI() {
+  showToast('Reindexing local knowledge from products and research...', 'info');
+  try {
+    const res = await api('/api/knowledge/reindex', { method: 'POST' });
+    showToast(`Reindexed: ${res.products_indexed} products, ${res.total_chunks_indexed} total chunks.`, 'success');
+    await loadKnowledgeBaseUI();
+  } catch (err) {
+    showToast(`Reindex failed: ${err.message}`, 'error');
+  }
+}
+
+async function searchKnowledgeHybridUI() {
+  const query = document.getElementById('knowledge-search-input')?.value.trim() || '';
+  const prodId = document.getElementById('knowledge-search-product')?.value || '';
+  const resDiv = document.getElementById('knowledge-search-results');
+  if (!query) {
+    showToast('Enter a query to search knowledge.', 'warning');
+    return;
+  }
+
+  if (resDiv) resDiv.innerHTML = '<p class="desc">Performing hybrid dense (vector) + lexical (BM25) search...</p>';
+
+  try {
+    const data = await api('/api/knowledge/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, product_id: prodId || null, top_k: 5 }),
+    });
+
+    if (!data || !data.results || !data.results.length) {
+      if (resDiv) resDiv.innerHTML = '<p class="desc" style="padding:var(--sp-3)">No matching knowledge chunks found.</p>';
+      return;
+    }
+
+    if (resDiv) {
+      resDiv.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-2)">
+          <span class="desc">Found ${data.count} matches (Mode: <strong>${escHtml(data.retrieval_mode)}</strong>)</span>
+          <span class="tag ${data.semantic_engine_available ? 'good' : 'warning'}">${data.semantic_engine_available ? 'Neural Semantic Active' : 'Degraded Lexical Only'}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:var(--sp-3)">
+          ${data.results.map((r, i) => `
+            <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm);border-left:3px solid var(--accent)">
+              <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-1);margin-bottom:var(--sp-2)">
+                <div style="display:flex;gap:var(--sp-2);align-items:center">
+                  <strong>#${i + 1}</strong>
+                  <span class="tag idle">${escHtml(r.entity_type)}</span>
+                  ${r.product_id ? `<span class="tag info">${escHtml(r.product_id)}</span>` : ''}
+                  <span class="tag ${r.verification_status === 'verified_observation' ? 'good' : 'idle'}">${escHtml(r.verification_status || 'verified_observation')}</span>
+                </div>
+                <div style="display:flex;gap:var(--sp-2);font-size:12px">
+                  <span>RRF: <strong>${r.score.toFixed(4)}</strong></span>
+                  ${r.similarity ? `<span class="desc">Dense Sim: ${(r.similarity * 100).toFixed(1)}%</span>` : ''}
+                  ${r.bm25_rank !== undefined ? `<span class="desc">BM25: ${r.bm25_rank.toFixed(2)}</span>` : ''}
+                </div>
+              </div>
+              <div class="desc" style="color:var(--text);white-space:pre-wrap;line-height:1.5">${escHtml(r.chunk_text)}</div>
+              ${r.source_url ? `<div class="desc" style="margin-top:var(--sp-2);font-size:11px"><a href="${escHtml(r.source_url)}" target="_blank" rel="noopener">${escHtml(r.source_url)}</a></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+async function deleteKnowledgeDocUI(entity_type, entity_id) {
+  if (!confirm(`Delete indexed knowledge for ${entity_type}:${entity_id}?`)) return;
+  try {
+    await api(`/api/knowledge/documents?entity_type=${encodeURIComponent(entity_type)}&entity_id=${encodeURIComponent(entity_id)}`, {
+      method: 'DELETE',
+    });
+    showToast('Knowledge document deleted.', 'success');
+    await loadKnowledgeBaseUI();
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`, 'error');
+  }
+}
+
 async function searchKnowledgeEmbeddingsUI() {
   const query = document.getElementById('embeddings-search-input')?.value || '';
   const resDiv = document.getElementById('embeddings-search-results');
@@ -4573,5 +4822,129 @@ async function searchKnowledgeEmbeddingsUI() {
     }
   } catch (err) {
     if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+// ── Knowledge Base & Local RAG Management ──
+
+async function loadKnowledgeBaseUI() {
+  const tbody = document.getElementById('knowledge-docs-tbody');
+  const countEl = document.getElementById('knowledge-docs-count');
+  const prodSelect = document.getElementById('knowledge-search-product');
+
+  try {
+    // Populate products in dropdown
+    const prodsData = await api('/api/products');
+    if (prodSelect && Array.isArray(prodsData)) {
+      prodSelect.innerHTML = '<option value="">All Products (Global)</option>' +
+        prodsData.map(p => `<option value="${p.id}">${escHtml(p.name)} (${p.sku || p.id})</option>`).join('');
+    }
+
+    const data = await api('/api/knowledge/documents');
+    const docs = data?.documents || [];
+    if (countEl) countEl.textContent = `${docs.length} document${docs.length === 1 ? '' : 's'}`;
+
+    if (!tbody) return;
+    if (!docs.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="desc" style="text-align:center;padding:var(--sp-4)">No indexed documents yet. Click "Reindex Knowledge" to populate from products and research.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = docs.map(d => `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:var(--sp-2)"><span class="tag idle">${escHtml(d.entity_type)}</span></td>
+        <td style="padding:var(--sp-2);font-weight:500">${escHtml(d.entity_id)}</td>
+        <td style="padding:var(--sp-2)">${d.product_id ? `<span class="tag good">${escHtml(d.product_id)}</span>` : (d.is_global ? '<span class="tag info">Global</span>' : '<span class="desc">None</span>')}</td>
+        <td style="padding:var(--sp-2)"><strong>${d.chunk_count}</strong> chunk${d.chunk_count === 1 ? '' : 's'}</td>
+        <td style="padding:var(--sp-2)"><span class="tag ${d.verification_status === 'verified_observation' ? 'good' : 'idle'}">${escHtml(d.verification_status || 'verified_observation')}</span></td>
+        <td style="padding:var(--sp-2)" class="desc">${d.indexed_at ? d.indexed_at.slice(0, 10) : ''}</td>
+        <td style="padding:var(--sp-2)">
+          <button class="btn btn-secondary" style="padding:2px 8px;font-size:11px" onclick="deleteKnowledgeDocUI('${escHtml(d.entity_type)}', '${escHtml(d.entity_id)}')">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="tag bad">${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function reindexKnowledgeBaseUI() {
+  showToast('Reindexing local knowledge from products and research...', 'info');
+  try {
+    const res = await api('/api/knowledge/reindex', { method: 'POST' });
+    showToast(`Reindexed: ${res.products_indexed} products, ${res.total_chunks_indexed} total chunks.`, 'success');
+    await loadKnowledgeBaseUI();
+  } catch (err) {
+    showToast(`Reindex failed: ${err.message}`, 'error');
+  }
+}
+
+async function searchKnowledgeHybridUI() {
+  const query = document.getElementById('knowledge-search-input')?.value.trim() || '';
+  const prodId = document.getElementById('knowledge-search-product')?.value || '';
+  const resDiv = document.getElementById('knowledge-search-results');
+  if (!query) {
+    showToast('Enter a query to search knowledge.', 'warning');
+    return;
+  }
+
+  if (resDiv) resDiv.innerHTML = '<p class="desc">Performing hybrid dense (vector) + lexical (BM25) search...</p>';
+
+  try {
+    const data = await api('/api/knowledge/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, product_id: prodId || null, top_k: 5 }),
+    });
+
+    if (!data || !data.results || !data.results.length) {
+      if (resDiv) resDiv.innerHTML = '<p class="desc" style="padding:var(--sp-3)">No matching knowledge chunks found.</p>';
+      return;
+    }
+
+    if (resDiv) {
+      resDiv.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-2)">
+          <span class="desc">Found ${data.count} matches (Mode: <strong>${escHtml(data.retrieval_mode)}</strong>)</span>
+          <span class="tag ${data.semantic_engine_available ? 'good' : 'warning'}">${data.semantic_engine_available ? 'Neural Semantic Active' : 'Degraded Lexical Only'}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:var(--sp-3)">
+          ${data.results.map((r, i) => `
+            <div style="background:var(--surface-2);padding:var(--sp-3);border-radius:var(--r-sm);border-left:3px solid var(--accent)">
+              <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:var(--sp-1);margin-bottom:var(--sp-2)">
+                <div style="display:flex;gap:var(--sp-2);align-items:center">
+                  <strong>#${i + 1}</strong>
+                  <span class="tag idle">${escHtml(r.entity_type)}</span>
+                  ${r.product_id ? `<span class="tag info">${escHtml(r.product_id)}</span>` : ''}
+                  <span class="tag ${r.verification_status === 'verified_observation' ? 'good' : 'idle'}">${escHtml(r.verification_status || 'verified_observation')}</span>
+                </div>
+                <div style="display:flex;gap:var(--sp-2);font-size:12px">
+                  <span>RRF: <strong>${r.score.toFixed(4)}</strong></span>
+                  ${r.similarity ? `<span class="desc">Dense Sim: ${(r.similarity * 100).toFixed(1)}%</span>` : ''}
+                  ${r.bm25_rank !== undefined ? `<span class="desc">BM25: ${r.bm25_rank.toFixed(2)}</span>` : ''}
+                </div>
+              </div>
+              <div class="desc" style="color:var(--text);white-space:pre-wrap;line-height:1.5">${escHtml(r.chunk_text)}</div>
+              ${r.source_url ? `<div class="desc" style="margin-top:var(--sp-2);font-size:11px"><a href="${escHtml(r.source_url)}" target="_blank" rel="noopener">${escHtml(r.source_url)}</a></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (resDiv) resDiv.innerHTML = `<div class="tag bad">${escHtml(err.message)}</div>`;
+  }
+}
+
+async function deleteKnowledgeDocUI(entity_type, entity_id) {
+  if (!confirm(`Delete indexed knowledge for ${entity_type}:${entity_id}?`)) return;
+  try {
+    await api(`/api/knowledge/documents?entity_type=${encodeURIComponent(entity_type)}&entity_id=${encodeURIComponent(entity_id)}`, {
+      method: 'DELETE',
+    });
+    showToast('Knowledge document deleted.', 'success');
+    await loadKnowledgeBaseUI();
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`, 'error');
   }
 }

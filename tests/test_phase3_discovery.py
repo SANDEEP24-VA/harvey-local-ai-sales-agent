@@ -88,11 +88,19 @@ def test_scout_search_backends_restricted_to_free(monkeypatch):
 
 
 def test_osm_tag_map_expanded():
-    """Verify OpenStreetMap includes software, tech, and modern business categories."""
+    """Verify OpenStreetMap maps physical business premises and trade tags, while software terms map to []."""
     osm = OpenStreetMap()
-    assert "software" in osm.TAG_MAP
-    assert "saas" in osm.TAG_MAP
-    assert "security" in osm.TAG_MAP
-    assert "ai" in osm.TAG_MAP
-    assert "office=it" in osm.TAG_MAP["software"]
-    assert "office=software" in osm.TAG_MAP["software"]
+    # Physical premises and trades map to appropriate OSM tags (craft=, shop=, amenity=, office=)
+    assert "roof" in osm.TAG_MAP
+    assert "craft=roofer" in osm.TAG_MAP["roof"]
+    assert "plumb" in osm.TAG_MAP
+    assert "craft=plumber" in osm.TAG_MAP["plumb"]
+    assert "dentist" in osm.TAG_MAP
+    assert "amenity=dentist" in osm.TAG_MAP["dentist"]
+    assert "lawyer" in osm.TAG_MAP
+    assert "office=lawyer" in osm.TAG_MAP["lawyer"]
+    # Intangible software terms that have no physical storefront/premises map to []
+    assert osm._tags("software") == []
+    assert osm._tags("saas") == []
+    assert osm._tags("ai") == []
+    assert osm._tags("b2b software") == []

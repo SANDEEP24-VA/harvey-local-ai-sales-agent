@@ -145,15 +145,11 @@ def test_normalize_domain_is_the_entity_key():
 
 def test_estimates_match_published_pricing():
     q = [D.DiscoveryQuery(term="roofer", location="Denver", limit=1000, depth=30)]
-    # DataForSEO's own worked example: 1,000 items = $0.012 + $0.36 = $0.372
-    assert D.estimate_cost("dataforseo_listings", q) == pytest.approx(0.372)
-    # SERP billing is the Live price x pages; depth 30 is three pages.
-    assert D.estimate_cost("dataforseo_serp", q) == pytest.approx(0.006)
     assert D.estimate_cost("osm", q) == 0.0
-    # Scavio: 1 credit a page at the $0.01 pay-as-you-go price. Maps
-    # pages hold 20 and stop at six; Search pages hold 10.
-    assert D.estimate_cost("scavio_maps", q) == pytest.approx(6 * 0.01)
-    assert D.estimate_cost("scavio_search", q) == pytest.approx(3 * 0.01)
+    assert D.estimate_cost("ddg", q) == 0.0
+    for paid in ["dataforseo_listings", "dataforseo_serp", "scavio_maps", "scavio_search"]:
+        with pytest.raises(ValueError, match="disabled"):
+            D.estimate_cost(paid, q)
 
 
 @pytest.mark.asyncio
@@ -785,16 +781,13 @@ def test_dataforseo_sandbox_is_never_the_live_host():
 
 def test_provider_menu_explains_cost_and_configuration():
     menu = {m["key"]: m for m in D.provider_menu({"serper_api_key": "k", "tinyfish_api_key": "tf"})}
+    assert menu.keys() == {"osm", "ddg"}
     assert menu["osm"]["configured"] is True and not menu["osm"]["needs_key"]
-    assert menu["serper"]["configured"] is True
-    assert menu["tinyfish"]["configured"] is True
-    assert menu["tinyfish"]["needs_key"] is True
-    assert menu["tinyfish"]["cost_note"] == "free"
-    assert "30 searches a minute" in menu["tinyfish"]["free_tier"]
-    assert "500 an hour" in menu["tinyfish"]["free_tier"]
-    assert menu["dataforseo_listings"]["configured"] is False
-    assert menu["dataforseo_listings"]["env_keys"] == [
-        "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"]
+    assert menu["ddg"]["configured"] is True and not menu["ddg"]["needs_key"]
+    assert menu["osm"]["cost_note"] == "free"
+    assert menu["ddg"]["cost_note"] == "free"
+    for paid in ["serper", "tinyfish", "dataforseo_listings", "dataforseo_serp", "scavio_maps", "scavio_search"]:
+        assert paid not in menu
     for entry in menu.values():
         assert entry["blurb"] and entry["cost_note"] and entry["signup_url"]
 
@@ -810,53 +803,35 @@ def test_the_default_provider_needs_no_account():
 async def test_unconfigured_provider_says_which_key_is_missing(state, config, monkeypatch):
     from sellbird.config import EnvConfig
     monkeypatch.setattr("sellbird.config.load_env", lambda: EnvConfig())
-    report = await D.run_discovery(state, config, "dataforseo_listings",
-                                   [D.DiscoveryQuery(term="roofer")])
-    assert report.stopped == "not configured"
-    assert "DATAFORSEO_LOGIN" in report.errors[0]
-
-    tf_report = await D.run_discovery(state, config, "tinyfish",
-                                      [D.DiscoveryQuery(term="roofer")])
-    assert tf_report.stopped == "not configured"
-    assert "TINYFISH_API_KEY" in tf_report.errors[0]
+    with pytest.raises(ValueError, match="disabled"):
+        await D.run_discovery(state, config, "dataforseo_listings",
+                               [D.DiscoveryQuery(term="roofer")])
+    with pytest.raises(ValueError, match="disabled"):
+        await D.run_discovery(state, config, "tinyfish",
+                              [D.DiscoveryQuery(term="roofer")])
 
 
 @pytest.mark.asyncio
 async def test_empty_api_key_runs_nothing_and_says_so(state, config,
                                                       register, monkeypatch):
-    """The 2026-10-24 bug: an empty SERPER_API_KEY placeholder "succeeded"
-    with 0 observations and exit code 0. It must stop with a named error."""
+    """Paid providers are disabled; empty API keys cannot reactivate them."""
     monkeypatch.setattr("sellbird.config.load_env",
                         lambda: EnvConfig(serper_api_key=""))
-    fake = register(D.Serper())   # fresh instance — don't mutate the singleton
-
-    async def must_not_fetch(client, env, query):
-        raise AssertionError("an unconfigured provider must not be called")
-    fake.fetch = must_not_fetch
-
-    report = await D.run_discovery(state, config, "serper",
-                                   [D.DiscoveryQuery(term="roofer")])
-    assert report.stopped == "not configured"
-    assert report.queries_ran == 0
-    assert "SERPER_API_KEY" in report.errors[0]
+    with pytest.raises(ValueError, match="disabled"):
+        await D.run_discovery(state, config, "serper",
+                               [D.DiscoveryQuery(term="roofer")])
 
 
 @pytest.mark.asyncio
 async def test_template_placeholder_key_is_treated_as_missing(state, config,
                                                               register,
                                                               monkeypatch):
+    """Paid providers are disabled; placeholder API keys cannot reactivate them."""
     monkeypatch.setattr("sellbird.config.load_env",
                         lambda: EnvConfig(serper_api_key="your_api_key_here"))
-    fake = register(D.Serper())   # fresh instance — don't mutate the singleton
-
-    async def must_not_fetch(client, env, query):
-        raise AssertionError("a placeholder key must not be sent to the API")
-    fake.fetch = must_not_fetch
-
-    report = await D.run_discovery(state, config, "serper",
-                                   [D.DiscoveryQuery(term="roofer")])
-    assert report.stopped == "not configured"
-    assert report.queries_ran == 0
+    with pytest.raises(ValueError, match="disabled"):
+        await D.run_discovery(state, config, "serper",
+                               [D.DiscoveryQuery(term="roofer")])
 
 
 @pytest.mark.parametrize("value,missing", [
@@ -869,7 +844,7 @@ async def test_template_placeholder_key_is_treated_as_missing(state, config,
     ("placeholder-team@example.com", False),           # DataForSEO logins are emails
 ])
 def test_missing_keys_flags_template_placeholders_not_real_keys(value, missing):
-    assert bool(D.PROVIDERS["serper"].missing_keys(
+    assert bool(D.Serper().missing_keys(
         {"serper_api_key": value})) is missing
 
 
@@ -1279,7 +1254,16 @@ async def test_directory_title_still_filtered_after_adapter(provider, tmp_path, 
     await seed_signal_catalog(state)
     for signal in SIGNAL_CATALOG:
         await state.set_signal_status(signal['code'], 'confirmed')
-    report = await D.run_discovery(state, load_config(), provider_key=provider,
+    # Disabled paid provider key must be rejected before any network request
+    with pytest.raises(ValueError, match="disabled"):
+        await D.run_discovery(state, load_config(), provider_key=provider,
+            queries=[D.DiscoveryQuery(term='roofer', location='Denver')])
+    # Test adapter junk filtering using mock test provider key
+    test_key = f"mock_{provider}"
+    p_obj = D.Serper() if provider == 'serper' else D.DataForSEOSerp() if provider == 'dataforseo_serp' else D.ScavioSearch()
+    p_obj.key = test_key
+    monkeypatch.setitem(D.PROVIDERS, test_key, p_obj)
+    report = await D.run_discovery(state, load_config(), provider_key=test_key,
         queries=[D.DiscoveryQuery(term='roofer', location='Denver')])
     assert report.errors == []
     assert report.junk == 1, report.as_dict()
@@ -1629,17 +1613,19 @@ def test_cli_exit_tracks_successful_queries(monkeypatch, config, attempted, succ
     monkeypatch.setattr(D, "run_discovery", estimate)
     monkeypatch.setattr(pipeline, "run_prospecting", prospect)
     if succeeded:
-        cmd_discover(_cli_args())
+        cmd_discover(_cli_args(provider="osm"))
     else:
         with pytest.raises(SystemExit) as exc:
-            cmd_discover(_cli_args())
+            cmd_discover(_cli_args(provider="osm"))
         assert exc.value.code == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 402, 403, 429])
 async def test_scavio_stops_run_on_account_errors(state, config, register, monkeypatch, status):
-    provider = register(D.ScavioSearch())
+    provider = D.ScavioSearch()
+    provider.key = "test_scavio_search"
+    register(provider)
     calls = []
     def handler(request):
         calls.append(request)
@@ -1660,7 +1646,9 @@ async def test_scavio_stops_run_on_account_errors(state, config, register, monke
 @pytest.mark.parametrize("failure", [402, 502])
 async def test_scavio_partial_search_preserves_prior_ranks_and_cost(state, config, register,
                                                                   monkeypatch, failure):
-    provider = register(D.ScavioSearch())
+    provider = D.ScavioSearch()
+    provider.key = "test_scavio_search"
+    register(provider)
     calls = []
     phase = ["seed"]
     def handler(request):
@@ -1718,7 +1706,9 @@ async def test_scavio_cost_resets_and_budget_stops_before_next_page():
 
 @pytest.mark.asyncio
 async def test_scavio_maps_resolves_coordinates_in_run(state, config, register, monkeypatch):
-    provider = register(D.ScavioMaps())
+    provider = D.ScavioMaps()
+    provider.key = "test_scavio_maps"
+    register(provider)
     resolved = []
     async def resolve(state, queries):
         resolved.extend(queries)

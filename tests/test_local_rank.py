@@ -171,18 +171,17 @@ async def test_task_errors_raise_but_no_results_is_empty():
 
 def test_estimates_use_live_pricing():
     q30 = [D.DiscoveryQuery(term="roofer", location="Denver", depth=30)]
-    # Live organic: $0.002 per page of 10 → depth 30 is three pages.
-    assert D.estimate_cost("dataforseo_serp", q30) == pytest.approx(0.006)
-    # Live Maps: $0.002 per SERP of up to 100 results.
-    assert D.estimate_cost("dataforseo_maps", q30) == pytest.approx(0.002)
-    q150 = [D.DiscoveryQuery(term="roofer", location="Denver", depth=150)]
-    assert D.estimate_cost("dataforseo_maps", q150) == pytest.approx(0.004)
+    assert D.estimate_cost("osm", q30) == 0.0
+    assert D.estimate_cost("ddg", q30) == 0.0
+    for paid in ("dataforseo_serp", "dataforseo_maps"):
+        with pytest.raises(ValueError, match="disabled"):
+            D.estimate_cost(paid, q30)
 
 
 def test_rank_cost_notes_match_live_pricing():
     serp = next(s for s in SIGNAL_CATALOG if s["code"] == "SERP_RANK")
     assert "0.006" in serp["cost_note"] and "0.0006" not in serp["cost_note"]
-    assert "0.006" in D.PROVIDERS["dataforseo_serp"].cost_note
+    assert "dataforseo_serp" not in D.PROVIDERS
     maps = next(s for s in SIGNAL_CATALOG if s["code"] == "MAPS_RANK")
     assert not maps["cost_note"].lower().startswith(("free", "included"))
 
@@ -219,7 +218,7 @@ async def test_local_pack_is_parsed_and_ads_are_dropped():
 
 @pytest.mark.asyncio
 async def test_maps_adapter():
-    provider = D.PROVIDERS["dataforseo_maps"]
+    provider = D.DataForSEOMaps()
     seen, out = await _capture(provider, D.DiscoveryQuery(
         term="roofer", location="Denver, CO", coordinate="39.7392,-104.9903,40"),
         payload=MAPS)
@@ -246,7 +245,7 @@ async def test_maps_adapter():
 
 @pytest.mark.asyncio
 async def test_maps_without_coordinates_uses_location_name():
-    seen, _ = await _capture(D.PROVIDERS["dataforseo_maps"], D.DiscoveryQuery(
+    seen, _ = await _capture(D.DataForSEOMaps(), D.DiscoveryQuery(
         term="roofer", location="Denver, CO"), payload=MAPS)
     assert seen["body"]["location_name"] == "Denver,Colorado,United States"
 
@@ -262,9 +261,17 @@ async def test_rank_providers_are_geocoded_before_the_run(state, monkeypatch):
     monkeypatch.setattr(D, "geocode_city", geocode)
     for key in ("dataforseo_serp", "dataforseo_maps"):
         q = [D.DiscoveryQuery(term="roofer", location="Denver, CO")]
-        await D.run_discovery(state, load_config(), key, q, dry_run=True)
-        assert q[0].coordinate == "39.7392,-104.9903,40"
-    assert calls == ["Denver, CO", "Denver, CO"]
+        with pytest.raises(ValueError, match="disabled"):
+            await D.run_discovery(state, load_config(), key, q, dry_run=True)
+
+    provider = D.DataForSEOSerp()
+    provider.key = "mock_needs_geo"
+    provider.needs_coordinates = True
+    monkeypatch.setitem(D.PROVIDERS, "mock_needs_geo", provider)
+    q = [D.DiscoveryQuery(term="roofer", location="Denver, CO")]
+    await D.run_discovery(state, load_config(), "mock_needs_geo", q, dry_run=True)
+    assert q[0].coordinate == "39.7392,-104.9903,40"
+    assert calls == ["Denver, CO"]
 
 
 # ── Keyword variants ──
@@ -300,12 +307,22 @@ def _install(monkeypatch, handler):
         transport=httpx.MockTransport(handler), **kw))
     monkeypatch.setattr("sellbird.config.load_env", lambda: EnvConfig(
         dataforseo_login="dummy", dataforseo_password="dummy"))
+    mock_serp = D.DataForSEOSerp()
+    mock_serp.key = "mock_serp"
+    mock_maps = D.DataForSEOMaps()
+    mock_maps.key = "mock_maps"
+    monkeypatch.setitem(D.PROVIDERS, "mock_serp", mock_serp)
+    monkeypatch.setitem(D.PROVIDERS, "mock_maps", mock_maps)
 
 
 @pytest.mark.asyncio
 async def test_rank_observations_name_the_keyword(state, monkeypatch):
     _install(monkeypatch, lambda r: httpx.Response(200, json=ORGANIC_WITH_PACK))
-    report = await D.run_discovery(state, load_config(), "dataforseo_serp", [
+    # Disabled paid provider key must be rejected
+    with pytest.raises(ValueError, match="disabled"):
+        await D.run_discovery(state, load_config(), "dataforseo_serp", [
+            D.DiscoveryQuery(term="roofer", location="Denver, CO")], max_spend=1.0)
+    report = await D.run_discovery(state, load_config(), "mock_serp", [
         D.DiscoveryQuery(term="roofer", location="Denver, CO")], max_spend=1.0)
     assert report.errors == []
     company = await state.get_company_by_domain("kettlemanroofing.com")
@@ -335,7 +352,7 @@ async def test_each_keyword_gets_its_own_rank_and_duplicates_keep_the_best(state
     _install(monkeypatch, handler)
     queries = [D.DiscoveryQuery(term=t, location="Denver, CO")
                for t in ("roofer", "roof repair", "roofer")]
-    report = await D.run_discovery(state, load_config(), "dataforseo_serp",
+    report = await D.run_discovery(state, load_config(), "mock_serp",
                                    queries, max_spend=1.0)
     assert report.new_companies == 1
     company = await state.get_company_by_domain("kettlemanroofing.com")
@@ -352,7 +369,7 @@ async def test_each_keyword_gets_its_own_rank_and_duplicates_keep_the_best(state
 @pytest.mark.asyncio
 async def test_maps_run_records_maps_rank_and_no_website(state, monkeypatch):
     _install(monkeypatch, lambda r: httpx.Response(200, json=MAPS))
-    await D.run_discovery(state, load_config(), "dataforseo_maps", [
+    await D.run_discovery(state, load_config(), "mock_maps", [
         D.DiscoveryQuery(term="roofer", location="Denver, CO")], max_spend=1.0)
     bob = await state.get_company_by_external_id("dataforseo:cid:333")
     codes = {r["signal_code"]: r for r in await state.get_observations(company_id=bob.id)}
@@ -454,7 +471,7 @@ async def test_a_repeat_search_never_overwrites_a_better_rank(state, monkeypatch
     ]
     _install(monkeypatch, lambda r: httpx.Response(200, json=_envelope(responses.pop(0))))
     q = [D.DiscoveryQuery(term="roofer", location="Denver, CO") for _ in range(2)]
-    await D.run_discovery(state, load_config(), "dataforseo_serp", q, max_spend=1.0)
+    await D.run_discovery(state, load_config(), "mock_serp", q, max_spend=1.0)
     company = await state.get_company_by_domain("kettlemanroofing.com")
     pack = await state.get_observations(company_id=company.id, signal_code="IN_LOCAL_PACK")
     organic = await state.get_observations(company_id=company.id, signal_code="SERP_RANK")
@@ -475,13 +492,14 @@ def _pack(slot, cid="222", domain="kettlemanroofing.com"):
             "title": "Kettleman Roofing", "is_paid": False, "cid": cid}
 
 
-async def _run(state, monkeypatch, pages, provider="dataforseo_serp", n=None):
+async def _run(state, monkeypatch, pages, provider="mock_serp", n=None):
     """One run; each query gets the next page of items."""
     pages = list(pages)
     _install(monkeypatch, lambda r: httpx.Response(200, json=_envelope(pages.pop(0))))
     q = [D.DiscoveryQuery(term="roofer", location="Denver, CO")
          for _ in range(n or len(pages))]
-    report = await D.run_discovery(state, load_config(), provider, q, max_spend=1.0)
+    pkey = "mock_maps" if provider == "dataforseo_maps" else provider
+    report = await D.run_discovery(state, load_config(), pkey, q, max_spend=1.0)
     assert report.errors == []
     return report
 
@@ -553,8 +571,8 @@ async def test_pack_and_maps_resolve_to_one_websiteless_company(state, monkeypat
     pack = _envelope([_pack(3, cid="333", domain=None) | {"title": "Bob's Roof Fix"}])
     maps = MAPS
     first, second = (pack, maps) if order == "pack_first" else (maps, pack)
-    for payload, key in ((first, "dataforseo_serp" if first is pack else "dataforseo_maps"),
-                         (second, "dataforseo_serp" if second is pack else "dataforseo_maps")):
+    for payload, key in ((first, "mock_serp" if first is pack else "mock_maps"),
+                         (second, "mock_serp" if second is pack else "mock_maps")):
         _install(monkeypatch, lambda r, p=payload: httpx.Response(200, json=p))
         report = await D.run_discovery(state, load_config(), key, [
             D.DiscoveryQuery(term="roofer", location="Denver, CO")], max_spend=1.0)
@@ -571,7 +589,7 @@ async def test_a_place_id_keyed_company_is_found_by_its_alias(state, monkeypatch
     """Rows stored before this change were keyed by place_id."""
     await state.add_company(Company(name="Bob's Roof Fix", external_id="dataforseo:ChIJbob"))
     report = await _run(state, monkeypatch, [MAPS["tasks"][0]["result"][0]["items"]],
-                        provider="dataforseo_maps")
+                        provider="mock_maps")
     assert report.known_companies == 1 and report.new_companies == 1
 
 

@@ -9,6 +9,7 @@ list tracked with SQLite's ``PRAGMA user_version`` so existing user DBs
 upgrade cleanly in place.
 """
 
+import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -745,6 +746,87 @@ MIGRATIONS: list[str] = [
     """,
 ]
 
+
+async def _migrate_v19(db: aiosqlite.Connection) -> None:
+    """v19: Knowledge RAG embeddings, FTS5 full-text index, and auto-sync triggers."""
+    # 1. Ensure knowledge_embeddings exists
+    cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_embeddings'")
+    tbl = await cursor.fetchone()
+    if not tbl:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NULL REFERENCES products(id) ON DELETE CASCADE,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                chunk_text TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                metadata_json TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    else:
+        cursor = await db.execute("PRAGMA table_info(knowledge_embeddings)")
+        cols = [r[1] for r in await cursor.fetchall()]
+        if "product_id" not in cols:
+            await db.execute("ALTER TABLE knowledge_embeddings ADD COLUMN product_id TEXT NULL REFERENCES products(id) ON DELETE CASCADE")
+            await db.execute("""
+                UPDATE knowledge_embeddings
+                SET product_id = json_extract(metadata_json, '$.product_id')
+                WHERE product_id IS NULL AND json_extract(metadata_json, '$.product_id') IS NOT NULL
+            """)
+
+    # 2. Indexes
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ke_entity ON knowledge_embeddings(entity_type, entity_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ke_product ON knowledge_embeddings(product_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ke_created ON knowledge_embeddings(created_at)")
+
+    # 3. Create FTS5 virtual table
+    await db.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+            chunk_id UNINDEXED,
+            product_id,
+            entity_type,
+            entity_id,
+            chunk_text,
+            tokenize = 'porter unicode61'
+        )
+    """)
+
+    # 4. Triggers to synchronize FTS5 with knowledge_embeddings
+    await db.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_ke_fts_insert AFTER INSERT ON knowledge_embeddings
+        BEGIN
+            INSERT INTO knowledge_fts (chunk_id, product_id, entity_type, entity_id, chunk_text)
+            VALUES (NEW.id, COALESCE(NEW.product_id, ''), NEW.entity_type, NEW.entity_id, NEW.chunk_text);
+        END
+    """)
+    await db.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_ke_fts_delete AFTER DELETE ON knowledge_embeddings
+        BEGIN
+            DELETE FROM knowledge_fts WHERE chunk_id = OLD.id;
+        END
+    """)
+    await db.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_ke_fts_update AFTER UPDATE ON knowledge_embeddings
+        BEGIN
+            DELETE FROM knowledge_fts WHERE chunk_id = OLD.id;
+            INSERT INTO knowledge_fts (chunk_id, product_id, entity_type, entity_id, chunk_text)
+            VALUES (NEW.id, COALESCE(NEW.product_id, ''), NEW.entity_type, NEW.entity_id, NEW.chunk_text);
+        END
+    """)
+
+    # 5. Backfill existing embeddings into knowledge_fts
+    await db.execute("""
+        INSERT INTO knowledge_fts (chunk_id, product_id, entity_type, entity_id, chunk_text)
+        SELECT id, COALESCE(product_id, ''), entity_type, entity_id, chunk_text
+        FROM knowledge_embeddings
+        WHERE id NOT IN (SELECT chunk_id FROM knowledge_fts)
+    """)
+
+# Append migration v19
+MIGRATIONS.append(_migrate_v19)
+
 BRAIN_PROVIDERS = ("ollama", "claude", "codex")
 _USAGE_LOG_COLUMN = {"ollama": "claude_calls", "claude": "claude_calls", "codex": "codex_calls"}
 
@@ -828,9 +910,73 @@ class StateManager:
 
             for target, script in enumerate(MIGRATIONS, start=1):
                 if version < target:
-                    await db.executescript(script)
+                    if callable(script):
+                        res = script(db)
+                        if asyncio.iscoroutine(res):
+                            await res
+                    else:
+                        await db.executescript(script)
                     await db.execute(f"PRAGMA user_version = {target}")
                     await db.commit()
+
+    async def get_knowledge_documents(self, product_id: str | None = None) -> list[dict]:
+        """List distinct indexed documents with chunk counts, type, product association, and metadata."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if product_id:
+                sql = """
+                    SELECT entity_type, entity_id, product_id,
+                           COUNT(*) as chunk_count,
+                           MIN(created_at) as indexed_at,
+                           MAX(metadata_json) as sample_metadata
+                    FROM knowledge_embeddings
+                    WHERE product_id = ?
+                    GROUP BY entity_type, entity_id, product_id
+                    ORDER BY indexed_at DESC
+                """
+                params = (product_id,)
+            else:
+                sql = """
+                    SELECT entity_type, entity_id, product_id,
+                           COUNT(*) as chunk_count,
+                           MIN(created_at) as indexed_at,
+                           MAX(metadata_json) as sample_metadata
+                    FROM knowledge_embeddings
+                    GROUP BY entity_type, entity_id, product_id
+                    ORDER BY indexed_at DESC
+                """
+                params = ()
+            async with db.execute(sql, params) as cursor:
+                rows = await cursor.fetchall()
+                docs = []
+                for r in rows:
+                    meta = {}
+                    try:
+                        meta = json.loads(r["sample_metadata"] or "{}")
+                    except Exception:
+                        pass
+                    docs.append({
+                        "entity_type": r["entity_type"],
+                        "entity_id": r["entity_id"],
+                        "product_id": r["product_id"],
+                        "chunk_count": r["chunk_count"],
+                        "indexed_at": r["indexed_at"],
+                        "source_url": meta.get("source_url", ""),
+                        "verification_status": meta.get("verification_status", "verified_observation"),
+                        "is_global": meta.get("is_global", False),
+                    })
+                return docs
+
+    async def delete_knowledge_document(self, entity_type: str, entity_id: str) -> int:
+        """Delete an indexed document and all its chunks (triggers clean FTS)."""
+        async with self._connect() as db:
+            async with db.execute(
+                "DELETE FROM knowledge_embeddings WHERE entity_type = ? AND entity_id = ?",
+                (entity_type, entity_id)
+            ) as cursor:
+                deleted = cursor.rowcount
+            await db.commit()
+            return deleted
 
     # ── Companies ──
 

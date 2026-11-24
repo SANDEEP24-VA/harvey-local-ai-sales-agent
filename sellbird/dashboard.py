@@ -1769,6 +1769,13 @@ async def create_product_route(request: Request):
     state = _state()
     prod_id = await state.add_product(p_create)
     product = await state.get_product(prod_id)
+    if product:
+        try:
+            from sellbird.embeddings import LocalEmbeddingEngine
+            engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+            engine.index_product(product)
+        except Exception as e:
+            logger.debug(f"Auto-index product failed: {e}")
     return JSONResponse(product.model_dump(mode="json") if product else {"id": prod_id}, status_code=201)
 
 
@@ -1800,6 +1807,16 @@ async def update_product_by_id_route(product_id: str, request: Request):
     if fields:
         await state.update_product(product_id, **fields)
     updated = await state.get_product(product_id)
+    if updated:
+        try:
+            from sellbird.embeddings import LocalEmbeddingEngine
+            engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+            engine.delete_document("product_doc", f"{product_id}_overview")
+            engine.delete_document("product_feature", f"{product_id}_features")
+            engine.delete_document("product_benefit", f"{product_id}_benefits")
+            engine.index_product(updated)
+        except Exception as e:
+            logger.debug(f"Auto-reindex product failed: {e}")
     return updated.model_dump(mode="json") if updated else {"ok": True}
 
 
@@ -1811,6 +1828,14 @@ async def archive_product_by_id_route(product_id: str):
     if not existing:
         return JSONResponse({"error": "Product not found"}, status_code=404)
     await state.archive_product(product_id)
+    try:
+        from sellbird.embeddings import LocalEmbeddingEngine
+        engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+        engine.delete_document("product_doc", f"{product_id}_overview")
+        engine.delete_document("product_feature", f"{product_id}_features")
+        engine.delete_document("product_benefit", f"{product_id}_benefits")
+    except Exception as e:
+        logger.debug(f"Clean product index failed: {e}")
     return {"ok": True, "archived": True, "id": product_id}
 
 
@@ -2374,7 +2399,11 @@ async def index_embeddings_route(request: Request):
     entity_type = str(body.get("entity_type", "document")).strip()
     entity_id = str(body.get("entity_id", "")).strip()
     text = str(body.get("text", "")).strip()
+    product_id = body.get("product_id")
     metadata = body.get("metadata") or {}
+    source_url = str(body.get("source_url", "")).strip()
+    verification_status = str(body.get("verification_status", "verified_observation")).strip()
+    is_global = bool(body.get("is_global", False))
 
     if not entity_id or not text:
         return JSONResponse({"error": "entity_id and text are required"}, status_code=400)
@@ -2384,7 +2413,11 @@ async def index_embeddings_route(request: Request):
         entity_type=entity_type,
         entity_id=entity_id,
         text=text,
+        product_id=product_id,
         metadata=metadata,
+        source_url=source_url,
+        verification_status=verification_status,
+        is_global=is_global,
     )
     return {"status": "indexed", "entity_type": entity_type, "entity_id": entity_id, "chunks_indexed": chunks}
 
@@ -2404,17 +2437,109 @@ async def search_embeddings_route(request: Request):
         return JSONResponse({"error": "query parameter is required"}, status_code=400)
 
     entity_type = body.get("entity_type")
+    product_id = body.get("product_id")
+    prospect_id = body.get("prospect_id")
     top_k = int(body.get("top_k", 5))
     min_sim = float(body.get("min_similarity", 0.20))
 
     engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
-    results = engine.search(
+    results = engine.search_dense(
         query=query,
+        product_id=product_id,
+        prospect_id=prospect_id,
         entity_type=entity_type,
         top_k=top_k,
         min_similarity=min_sim,
     )
     return {"query": query, "results": results, "count": len(results)}
+
+
+@app.get("/api/knowledge/documents")
+async def get_knowledge_documents_route(product_id: str | None = None):
+    """List indexed documents with chunk count, product association, and verification status."""
+    state = _state()
+    docs = await state.get_knowledge_documents(product_id=product_id)
+    return {"documents": docs, "total_count": len(docs)}
+
+
+@app.post("/api/knowledge/search")
+async def search_knowledge_hybrid_route(request: Request):
+    """Perform hybrid dense + lexical search with Reciprocal Rank Fusion (RRF) and explainability."""
+    from sellbird.embeddings import LocalEmbeddingEngine
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid JSON: {e}"}, status_code=400)
+
+    query = str(body.get("query", "")).strip()
+    if not query:
+        return JSONResponse({"error": "query parameter is required"}, status_code=400)
+
+    product_id = body.get("product_id")
+    prospect_id = body.get("prospect_id")
+    entity_type = body.get("entity_type")
+    top_k = int(body.get("top_k", 5))
+    min_score = float(body.get("min_score", 0.0))
+
+    engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+    results = engine.search_hybrid(
+        query=query,
+        product_id=product_id,
+        prospect_id=prospect_id,
+        entity_type=entity_type,
+        top_k=top_k,
+        min_score=min_score,
+    )
+    mode = results[0].get("retrieval_mode", "hybrid_rrf") if results else ("hybrid_rrf" if engine.is_semantic_available else "lexical_only_degraded")
+    return {
+        "query": query,
+        "results": results,
+        "count": len(results),
+        "retrieval_mode": mode,
+        "semantic_engine_available": engine.is_semantic_available,
+    }
+
+
+@app.post("/api/knowledge/reindex")
+async def reindex_knowledge_route(request: Request):
+    """Reindex all active products and research cache into the local knowledge store."""
+    from sellbird.embeddings import LocalEmbeddingEngine
+
+    state = _state()
+    engine = LocalEmbeddingEngine(db_path=str(DB_PATH))
+
+    # 1. Reindex products
+    products = await state.get_products(include_archived=False)
+    products_indexed = 0
+    chunks_indexed = 0
+    for p in products:
+        c = engine.index_product(p)
+        chunks_indexed += c
+        products_indexed += 1
+
+    # 2. Reindex research cache
+    cache_items = await state.get_recent_research_cache(limit=100)
+    research_indexed = 0
+    for item in cache_items:
+        c = engine.index_research_cache_item(item)
+        chunks_indexed += c
+        research_indexed += 1
+
+    return {
+        "status": "reindexed",
+        "products_indexed": products_indexed,
+        "research_items_indexed": research_indexed,
+        "total_chunks_indexed": chunks_indexed,
+    }
+
+
+@app.delete("/api/knowledge/documents")
+async def delete_knowledge_document_route(entity_type: str, entity_id: str):
+    """Delete an indexed document and its chunks."""
+    state = _state()
+    deleted = await state.delete_knowledge_document(entity_type, entity_id)
+    return {"ok": True, "deleted_chunks": deleted}
 
 
 @app.post("/api/products/{product_id}/opportunity-score")
